@@ -13,6 +13,13 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Escáner de valores con dos formas de guardar resultados:
@@ -58,6 +65,22 @@ final class Scanner implements Closeable {
                 val = Arrays.copyOf(val, cap);
             }
             addr[n] = a; val[n] = v; n++;
+        }
+
+        /** Une los resultados de cada bloque en orden (los null se saltan). Los siguientes escaneos los necesitan ordenados. */
+        static Results concat(Results[] parts) {
+            int total = 0;
+            for (Results r : parts) if (r != null) total += r.n;
+            Results out = new Results();
+            out.addr = new long[Math.max(total, 1)];
+            out.val = new double[Math.max(total, 1)];
+            for (Results r : parts) {
+                if (r == null) continue;
+                System.arraycopy(r.addr, 0, out.addr, out.n, r.n);
+                System.arraycopy(r.val, 0, out.val, out.n, r.n);
+                out.n += r.n;
+            }
+            return out;
         }
     }
 
@@ -157,42 +180,122 @@ final class Scanner implements Closeable {
         return out;
     }
 
-    // ---- lista
-    /** Devuelve null si hay demasiados resultados para una lista (más de SPARSE_LIMIT). */
-    private Results sparseExact(double value, Progress p) {
-        Results res = new Results();
-        ByteBuffer t = ByteBuffer.wrap(type.encode(value)).order(Win.LE);
-        int sz = type.size, align = type.align();
-        Memory mem = new Memory(CHUNK + OVERLAP);
-        List<Win.Region> regs = proc.regions(true);
-        for (int r = 0; r < regs.size(); r++) {
-            long base = regs.get(r).base(), size = regs.get(r).size();
-            for (long off = 0; off < size; off += CHUNK) {
-                if (res.n > SPARSE_LIMIT) return null;
-                p.update(r, regs.size()); // también es donde se nota si se canceló, en regiones enormes
-                int got = proc.readInto(base + off, mem, (int) Math.min(CHUNK + OVERLAP, size - off));
-                if (got < sz) continue;
-                ByteBuffer b = mem.getByteBuffer(0, got).order(Win.LE);
-                int last = Math.min(got - sz, CHUNK - 1); // lo que pasa de CHUNK es del siguiente bloque
-                long a0 = base + off;
-                if (type.isFloat) {
-                    for (int i = 0; i <= last; i += align) {
-                        double v = type.get(b, i);
-                        if (eq(v, value)) res.add(a0 + i, v);
-                    }
-                } else {
-                    double stored = type.get(t, 0);
-                    switch (sz) {
-                        case 1 -> { byte x = t.get(0); for (int i = 0; i <= last; i += align) if (b.get(i) == x) res.add(a0 + i, stored); }
-                        case 2 -> { short x = t.getShort(0); for (int i = 0; i <= last; i += align) if (b.getShort(i) == x) res.add(a0 + i, stored); }
-                        case 4 -> { int x = t.getInt(0); for (int i = 0; i <= last; i += align) if (b.getInt(i) == x) res.add(a0 + i, stored); }
-                        default -> { long x = t.getLong(0); for (int i = 0; i <= last; i += align) if (b.getLong(i) == x) res.add(a0 + i, stored); }
+    // ---- varios hilos
+    /** Hilos para los escaneos: cada uno usa 16-32 MB de buffers nativos, así que se limitan. */
+    static final int MAX_THREADS = 8;
+    /** Cada cuánto revisa sparseExact si ya hay demasiados resultados (para no llenar la RAM entre varios hilos). */
+    static final int SUB = 1024 * 1024;
+
+    /** La memoria escribible del juego en bloques de CHUNK (+ OVERLAP), con su posición en el archivo de instantánea. */
+    private List<Block> makeBlocks() {
+        List<Block> out = new ArrayList<>();
+        long fileOff = 0;
+        for (Win.Region r : proc.regions(true))
+            for (long off = 0; off < r.size(); off += CHUNK) {
+                int len = (int) Math.min(CHUNK + OVERLAP, r.size() - off);
+                out.add(new Block(r.base() + off, len, fileOff));
+                fileOff += len;
+            }
+        return out;
+    }
+
+    /** Buffers de un hilo: uno para la memoria del juego y, si hace falta, otro para la instantánea anterior. */
+    private static final class Buffers implements AutoCloseable {
+        final Memory cur = new Memory(CHUNK + OVERLAP);
+        private Memory prev;
+
+        Memory prev() {
+            if (prev == null) prev = new Memory(CHUNK + OVERLAP);
+            return prev;
+        }
+
+        /** Libera la memoria nativa ya, sin esperar al recolector de basura. */
+        @Override public void close() {
+            cur.close();
+            if (prev != null) prev.close();
+        }
+    }
+
+    private interface BlockWork { void run(int block, Buffers buf) throws IOException; }
+
+    /** Ejecuta work para cada bloque repartiéndolos entre varios hilos; el progreso cuenta bloques terminados. */
+    private static void forEachBlock(int n, Progress p, BlockWork work) throws IOException {
+        if (n == 0) return;
+        int threads = Math.min(n, Math.min(MAX_THREADS, Math.max(1, Runtime.getRuntime().availableProcessors() - 1)));
+        ExecutorService ex = Executors.newFixedThreadPool(threads);
+        AtomicInteger next = new AtomicInteger(), done = new AtomicInteger();
+        List<Future<?>> futures = new ArrayList<>();
+        for (int t = 0; t < threads; t++)
+            futures.add(ex.submit(() -> {
+                try (Buffers buf = new Buffers()) {
+                    for (int i; (i = next.getAndIncrement()) < n; ) {
+                        work.run(i, buf);
+                        p.update(done.incrementAndGet(), n); // aquí se nota si se canceló
                     }
                 }
-            }
-            p.update(r + 1, regs.size());
+                return null;
+            }));
+        ex.shutdown();
+        try {
+            for (Future<?> f : futures) f.get();
+        } catch (ExecutionException e) {
+            ex.shutdownNow();
+            if (e.getCause() instanceof IOException io) throw io;
+            if (e.getCause() instanceof RuntimeException rt) throw rt;
+            if (e.getCause() instanceof Error err) throw err;
+            throw new IllegalStateException(e.getCause());
+        } catch (InterruptedException e) {
+            ex.shutdownNow();
+            Thread.currentThread().interrupt();
+            throw new Progress.Cancelled();
         }
-        return res;
+    }
+
+    // ---- lista
+    /** Devuelve null si hay demasiados resultados para una lista (más de SPARSE_LIMIT). */
+    private Results sparseExact(double value, Progress p) throws IOException {
+        List<Block> bl = makeBlocks();
+        Results[] parts = new Results[bl.size()];
+        AtomicLong total = new AtomicLong();
+        AtomicBoolean tooMany = new AtomicBoolean();
+        int sz = type.size;
+        forEachBlock(bl.size(), p, (i, buf) -> {
+            if (tooMany.get()) return;
+            Block b = bl.get(i);
+            int got = proc.readInto(b.base(), buf.cur, b.len());
+            if (got < sz) return;
+            ByteBuffer bb = buf.cur.getByteBuffer(0, got).order(Win.LE);
+            int last = Math.min(got - sz, CHUNK - 1); // lo que pasa de CHUNK es del siguiente bloque
+            Results res = new Results();
+            for (int from = 0; from <= last; from += SUB) {
+                int before = res.n;
+                matchExact(bb, from, Math.min(last, from + SUB - 1), b.base(), value, res);
+                if (total.addAndGet(res.n - before) > SPARSE_LIMIT) { tooMany.set(true); return; }
+            }
+            parts[i] = res;
+        });
+        return tooMany.get() ? null : Results.concat(parts);
+    }
+
+    /** Agrega a res las posiciones de b en [from, to] (alineadas) donde está value. */
+    private void matchExact(ByteBuffer b, int from, int to, long a0, double value, Results res) {
+        int align = type.align();
+        if (type.isFloat) {
+            for (int i = from; i <= to; i += align) {
+                double v = type.get(b, i);
+                if (eq(v, value)) res.add(a0 + i, v);
+            }
+            return;
+        }
+        // Enteros: se compara el valor crudo, sin pasar cada posición a double
+        ByteBuffer t = ByteBuffer.wrap(type.encode(value)).order(Win.LE);
+        double stored = type.get(t, 0);
+        switch (type.size) {
+            case 1 -> { byte x = t.get(0); for (int i = from; i <= to; i += align) if (b.get(i) == x) res.add(a0 + i, stored); }
+            case 2 -> { short x = t.getShort(0); for (int i = from; i <= to; i += align) if (b.getShort(i) == x) res.add(a0 + i, stored); }
+            case 4 -> { int x = t.getInt(0); for (int i = from; i <= to; i += align) if (b.getInt(i) == x) res.add(a0 + i, stored); }
+            default -> { long x = t.getLong(0); for (int i = from; i <= to; i += align) if (b.getLong(i) == x) res.add(a0 + i, stored); }
+        }
     }
 
     private Results sparseNext(Results old, Mode m, double v1, double v2, Progress p) {
@@ -246,69 +349,61 @@ final class Scanner implements Closeable {
         }
     }
 
+    // Los hilos escriben cada bloque en su propia posición del archivo: FileChannel permite escrituras
+    // posicionales simultáneas.
     private Dense denseFirst(Mode m, double v1, double v2, Progress p) throws IOException {
         openFiles();
-        blocks = new ArrayList<>();
-        long fileOff = 0;
-        for (Win.Region r : proc.regions(true))
-            for (long off = 0; off < r.size(); off += CHUNK) {
-                int len = (int) Math.min(CHUNK + OVERLAP, r.size() - off);
-                blocks.add(new Block(r.base() + off, len, fileOff));
-                fileOff += len;
-            }
-        BitSet[] bits = new BitSet[blocks.size()];
-        Memory mem = new Memory(CHUNK + OVERLAP);
+        List<Block> bl = blocks = makeBlocks();
+        FileChannel out = files[0];
+        BitSet[] bits = new BitSet[bl.size()];
+        AtomicLong count = new AtomicLong();
         int sz = type.size, al = type.align();
-        long count = 0;
-        for (int i = 0; i < blocks.size(); i++) {
-            Block b = blocks.get(i);
+        forEachBlock(bl.size(), p, (i, buf) -> {
+            Block b = bl.get(i);
             BitSet bs = new BitSet();
-            int got = proc.readInto(b.base(), mem, b.len());
+            int got = proc.readInto(b.base(), buf.cur, b.len());
             if (got >= sz) {
-                ByteBuffer buf = mem.getByteBuffer(0, got).order(Win.LE);
-                writeFully(files[0], mem.getByteBuffer(0, got), b.fileOff());
+                ByteBuffer bb = buf.cur.getByteBuffer(0, got).order(Win.LE);
+                writeFully(out, buf.cur.getByteBuffer(0, got), b.fileOff());
                 int slots = Math.min((got - sz) / al + 1, CHUNK / al); // los bytes de OVERLAP son del siguiente bloque
                 if (m == Mode.UNKNOWN) bs.set(0, slots);
-                else for (int k = 0; k < slots; k++) if (test(m, type.get(buf, k * al), 0, v1, v2)) bs.set(k);
-                count += bs.cardinality();
+                else for (int k = 0; k < slots; k++) if (test(m, type.get(bb, k * al), 0, v1, v2)) bs.set(k);
+                count.addAndGet(bs.cardinality());
             }
             bits[i] = bs;
-            p.update(i + 1, blocks.size());
-        }
-        return new Dense(bits, 0, count);
+        });
+        return new Dense(bits, 0, count.get());
     }
 
     private Dense denseNext(Dense old, Mode m, double v1, double v2, Progress p) throws IOException {
         int nf = 1 - old.file();
-        BitSet[] nb = new BitSet[blocks.size()];
-        Memory mem = new Memory(CHUNK + OVERLAP);
-        ByteBuffer prevBuf = ByteBuffer.allocate(CHUNK + OVERLAP).order(Win.LE);
+        List<Block> bl = blocks;
+        FileChannel in = files[old.file()], out = files[nf];
+        BitSet[] nb = new BitSet[bl.size()];
+        AtomicLong count = new AtomicLong();
         int sz = type.size, al = type.align();
-        long count = 0;
-        for (int i = 0; i < blocks.size(); i++) {
+        forEachBlock(bl.size(), p, (i, buf) -> {
             BitSet ob = old.bits()[i];
-            if (ob.isEmpty()) { nb[i] = ob; continue; }
-            Block b = blocks.get(i);
+            if (ob.isEmpty()) { nb[i] = ob; return; }
+            Block b = bl.get(i);
             BitSet bs = (BitSet) ob.clone();
-            int got = proc.readInto(b.base(), mem, b.len());
+            int got = proc.readInto(b.base(), buf.cur, b.len());
             if (got < sz) bs.clear();
             else {
-                ByteBuffer cur = mem.getByteBuffer(0, got).order(Win.LE);
-                prevBuf.clear();
-                prevBuf.limit(b.len());
-                readFully(files[old.file()], prevBuf, b.fileOff());
+                ByteBuffer cur = buf.cur.getByteBuffer(0, got).order(Win.LE);
+                ByteBuffer prevBuf = buf.prev().getByteBuffer(0, b.len()).order(Win.LE);
+                readFully(in, prevBuf, b.fileOff());
                 for (int k = bs.nextSetBit(0); k >= 0; k = bs.nextSetBit(k + 1)) {
                     int off = k * al;
                     if (off + sz > got) { bs.clear(k, Integer.MAX_VALUE); break; }
                     if (!test(m, type.get(cur, off), type.get(prevBuf, off), v1, v2)) bs.clear(k);
                 }
-                if (!bs.isEmpty()) writeFully(files[nf], mem.getByteBuffer(0, got), b.fileOff());
+                if (!bs.isEmpty()) writeFully(out, buf.cur.getByteBuffer(0, got), b.fileOff());
             }
             nb[i] = bs;
-            count += bs.cardinality();
-            p.update(i + 1, blocks.size());
-        }
-        return new Dense(nb, nf, count);
+            count.addAndGet(bs.cardinality());
+        });
+        return new Dense(nb, nf, count.get());
     }
 
     /** Si la instantánea ya tiene pocos resultados, la convierte en lista (más rápida). */

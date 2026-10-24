@@ -14,6 +14,27 @@ class ScannerTest {
     static final Progress CANCEL = (done, total) -> { throw new Progress.Cancelled(); };
 
     @Test
+    void variosBloquesEnVariosHilosQuedanOrdenados() throws Exception {
+        // 4 bloques: cada hilo termina en otro orden, pero la lista tiene que salir ordenada por dirección
+        FakeMemory m = new FakeMemory(BASE, Scanner.CHUNK * 4);
+        long[] where = {0x10, Scanner.CHUNK + 0x20, Scanner.CHUNK * 2L + 0x30, Scanner.CHUNK * 3L + 0x40, Scanner.CHUNK * 4L - 4};
+        for (long w : where) m.mem.setInt(w, 777);
+        try (Scanner s = new Scanner(m, ValueType.INT4)) {
+            s.firstScan(Scanner.Mode.EXACT, 777, 0, NONE);
+            long[] got = s.firstAddresses(10);
+            assertEquals(where.length, got.length);
+            for (int i = 0; i < where.length; i++) assertEquals(BASE + where[i], got[i]);
+
+            // Y por la instantánea: «Mayor que 776» y luego «Sin cambio»
+            s.firstScan(Scanner.Mode.GT, 776, 0, NONE);
+            assertEquals(where.length, s.count());
+            m.mem.setInt(where[2], 778);
+            s.nextScan(Scanner.Mode.UNCHANGED, 0, 0, NONE);
+            assertEquals(where.length - 1, s.count());
+        }
+    }
+
+    @Test
     void cancelarElPrimerEscaneoNoDejaResultados() {
         FakeMemory m = new FakeMemory(BASE, 64 * 1024);
         for (Scanner.Mode mode : new Scanner.Mode[]{Scanner.Mode.EXACT, Scanner.Mode.UNKNOWN})
