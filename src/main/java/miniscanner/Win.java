@@ -23,6 +23,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
 
@@ -78,7 +80,13 @@ final class Win {
     static final class Proc implements MemorySource {
         final ProcInfo info;
         final int ptrSize;
-        private HANDLE h;
+        /**
+         * Lo usan a la vez el escaneo, el congelado, las teclas rápidas y la ventana. Cada uso toma el candado
+         * compartido, y close() toma el exclusivo: así nadie usa un handle ya cerrado (que Windows podría haber
+         * reutilizado para otra cosa).
+         */
+        private final ReadWriteLock lock = new ReentrantReadWriteLock();
+        private HANDLE h; // protegido por lock; null = cerrado
         volatile List<Module> modules = List.of();
 
         Proc(ProcInfo info) {
@@ -93,21 +101,48 @@ final class Win {
 
         volatile boolean suspended;
 
-        void close() { resume(); if (h != null) { K.K32.CloseHandle(h); h = null; } }
+        /**
+         * Espera a que terminen las lecturas/escrituras en curso, reanuda el juego si estaba pausado y cierra.
+         * Es synchronized como suspend()/resume(): siempre se toma primero el monitor y luego el candado.
+         */
+        synchronized void close() {
+            lock.writeLock().lock();
+            try {
+                resume();
+                if (h != null) { K.K32.CloseHandle(h); h = null; }
+            } finally {
+                lock.writeLock().unlock();
+            }
+        }
 
         /** false cuando el juego ya se cerró. */
         boolean isAlive() {
-            IntByReference code = new IntByReference();
-            return h != null && K.K32.GetExitCodeProcess(h, code) && code.getValue() == STILL_ACTIVE;
+            lock.readLock().lock();
+            try {
+                IntByReference code = new IntByReference();
+                return h != null && K.K32.GetExitCodeProcess(h, code) && code.getValue() == STILL_ACTIVE;
+            } finally {
+                lock.readLock().unlock();
+            }
         }
 
         /** Pausa todo el juego (para escanear valores que cambian muy rápido). */
         synchronized void suspend() {
-            if (!suspended && h != null) { NtHolder.NT.NtSuspendProcess(h); suspended = true; }
+            lock.readLock().lock();
+            try {
+                if (!suspended && h != null) { NtHolder.NT.NtSuspendProcess(h); suspended = true; }
+            } finally {
+                lock.readLock().unlock();
+            }
         }
 
         synchronized void resume() {
-            if (suspended && h != null) { NtHolder.NT.NtResumeProcess(h); suspended = false; }
+            lock.readLock().lock(); // close() ya tiene el exclusivo y puede tomarlo igual
+            try {
+                if (suspended && h != null) { NtHolder.NT.NtResumeProcess(h); suspended = false; }
+            } finally {
+                lock.readLock().unlock();
+            }
         }
 
         void refreshModules() {
@@ -147,33 +182,45 @@ final class Win {
 
         public List<Region> regions(boolean writableOnly) {
             List<Region> out = new ArrayList<>();
-            WinNT.MEMORY_BASIC_INFORMATION mbi = new WinNT.MEMORY_BASIC_INFORMATION();
-            long addr = 0;
-            while (K.K32.VirtualQueryEx(h, new Pointer(addr), mbi, new BaseTSD.SIZE_T(mbi.size())).longValue() != 0) {
-                long base = mbi.baseAddress == null ? 0 : Pointer.nativeValue(mbi.baseAddress);
-                long size = mbi.regionSize.longValue();
-                int prot = mbi.protect.intValue();
-                boolean ok = mbi.state.intValue() == MEM_COMMIT && (prot & (PAGE_GUARD | PAGE_NOACCESS)) == 0
-                        && (!writableOnly || (prot & WRITABLE) != 0);
-                if (ok) out.add(new Region(base, size));
-                if (size <= 0) break;
-                addr = base + size;
+            lock.readLock().lock();
+            try {
+                if (h == null) return out;
+                WinNT.MEMORY_BASIC_INFORMATION mbi = new WinNT.MEMORY_BASIC_INFORMATION();
+                long addr = 0;
+                while (K.K32.VirtualQueryEx(h, new Pointer(addr), mbi, new BaseTSD.SIZE_T(mbi.size())).longValue() != 0) {
+                    long base = mbi.baseAddress == null ? 0 : Pointer.nativeValue(mbi.baseAddress);
+                    long size = mbi.regionSize.longValue();
+                    int prot = mbi.protect.intValue();
+                    boolean ok = mbi.state.intValue() == MEM_COMMIT && (prot & (PAGE_GUARD | PAGE_NOACCESS)) == 0
+                            && (!writableOnly || (prot & WRITABLE) != 0);
+                    if (ok) out.add(new Region(base, size));
+                    if (size <= 0) break;
+                    addr = base + size;
+                }
+            } finally {
+                lock.readLock().unlock();
             }
             return out;
         }
 
         /** Lee hasta size bytes; si una parte no se puede leer, devuelve cuántos bytes seguidos sí se leyeron. */
         public int readInto(long addr, Memory mem, int size) {
-            IntByReference n = new IntByReference();
-            if (K.K32.ReadProcessMemory(h, new Pointer(addr), mem, size, n)) return n.getValue();
-            // Falló (p. ej. el juego liberó una página después de VirtualQueryEx): se lee página por página
-            int done = 0;
-            while (done < size) {
-                int len = (int) Math.min(size - done, PAGE - ((addr + done) & (PAGE - 1)));
-                if (!K.K32.ReadProcessMemory(h, new Pointer(addr + done), mem.share(done), len, n) || n.getValue() != len) break;
-                done += len;
+            lock.readLock().lock();
+            try {
+                if (h == null) return 0;
+                IntByReference n = new IntByReference();
+                if (K.K32.ReadProcessMemory(h, new Pointer(addr), mem, size, n)) return n.getValue();
+                // Falló (p. ej. el juego liberó una página después de VirtualQueryEx): se lee página por página
+                int done = 0;
+                while (done < size) {
+                    int len = (int) Math.min(size - done, PAGE - ((addr + done) & (PAGE - 1)));
+                    if (!K.K32.ReadProcessMemory(h, new Pointer(addr + done), mem.share(done), len, n) || n.getValue() != len) break;
+                    done += len;
+                }
+                return done;
+            } finally {
+                lock.readLock().unlock();
             }
-            return done;
         }
 
         public byte[] read(long addr, int size) {
@@ -194,7 +241,12 @@ final class Win {
             if (addr <= 0) return false;
             Memory mem = new Memory(data.length);
             mem.write(0, data, 0, data.length);
-            return K.K32.WriteProcessMemory(h, new Pointer(addr), mem, data.length, new IntByReference());
+            lock.readLock().lock();
+            try {
+                return h != null && K.K32.WriteProcessMemory(h, new Pointer(addr), mem, data.length, new IntByReference());
+            } finally {
+                lock.readLock().unlock();
+            }
         }
     }
 
