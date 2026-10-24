@@ -14,7 +14,7 @@ import static miniscanner.Ui.*;
 /**
  * MiniScanner - escáner/editor de memoria estilo Cheat Engine (solo Windows).
  * La ventana guarda el proceso abierto y lo común a todas las pestañas; cada pestaña vive en su clase:
- * {@link ScannerTab}, {@link CheatTab}, {@link PointerTab} y {@link MemoryTab}.
+ * {@link ScannerTab}, {@link CheatTab}, {@link PointerTab}, {@link MemoryTab} y {@link BytesTab}.
  */
 public class MiniScanner extends JFrame {
     static final int MAX_SHOWN = 1000;
@@ -43,6 +43,7 @@ public class MiniScanner extends JFrame {
     final CheatTab cheatTab;
     final PointerTab pointerTab;
     final MemoryTab memoryTab;
+    final BytesTab bytesTab;
 
     MiniScanner() {
         super("MiniScanner");
@@ -64,10 +65,12 @@ public class MiniScanner extends JFrame {
         cheatTab = new CheatTab(this);
         pointerTab = new PointerTab(this);
         memoryTab = new MemoryTab(this);
+        bytesTab = new BytesTab(this);
         tabs.addTab("Escáner", scannerTab);
         tabs.addTab("Tabla de trucos", cheatTab);
         tabs.addTab("Pointers", pointerTab);
         tabs.addTab("Memoria", memoryTab);
+        tabs.addTab("Bytes / Texto", bytesTab);
 
         status.setBorder(BorderFactory.createEmptyBorder(3, 6, 3, 6));
         progressBar.setStringPainted(true);

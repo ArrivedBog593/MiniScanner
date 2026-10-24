@@ -52,6 +52,16 @@ final class Win {
         static final NtDll NT = Native.load("ntdll", NtDll.class);
     }
 
+    /** Funciones de kernel32 que JNA no trae. */
+    interface Kernel32Ex extends com.sun.jna.Library {
+        boolean VirtualProtectEx(HANDLE h, Pointer addr, BaseTSD.SIZE_T size, int newProtect, IntByReference oldProtect);
+        boolean FlushInstructionCache(HANDLE h, Pointer addr, BaseTSD.SIZE_T size);
+    }
+
+    private static final class K2 { static final Kernel32Ex K = Native.load("kernel32", Kernel32Ex.class); }
+
+    static final int PAGE_EXECUTE_READWRITE = 0x40;
+
     record ProcInfo(String name, int pid) {}
     record Region(long base, long size) { long end() { return base + size; } }
     record Module(String name, long base, long size) { long end() { return base + size; } }
@@ -237,13 +247,27 @@ final class Win {
             return ptrSize == 8 ? bb.getLong() : bb.getInt() & 0xFFFFFFFFL;
         }
 
+        /** Escribe en el juego; también en código o memoria de solo lectura (permite escribir un momento). */
         boolean write(long addr, byte[] data) {
-            if (addr <= 0) return false;
+            if (addr <= 0 || data.length == 0) return false;
             Memory mem = new Memory(data.length);
             mem.write(0, data, 0, data.length);
             lock.readLock().lock();
             try {
-                return h != null && K.K32.WriteProcessMemory(h, new Pointer(addr), mem, data.length, new IntByReference());
+                if (h == null) return false;
+                Pointer p = new Pointer(addr);
+                if (K.K32.WriteProcessMemory(h, p, mem, data.length, new IntByReference())) return true;
+                // Código (p. ej. al parchear un AOB) o datos de solo lectura: se cambia la protección y se restaura
+                BaseTSD.SIZE_T size = new BaseTSD.SIZE_T(data.length);
+                IntByReference old = new IntByReference();
+                if (!K2.K.VirtualProtectEx(h, p, size, PAGE_EXECUTE_READWRITE, old)) return false;
+                try {
+                    boolean ok = K.K32.WriteProcessMemory(h, p, mem, data.length, new IntByReference());
+                    if (ok) K2.K.FlushInstructionCache(h, p, size); // por si era código que ya está en caché
+                    return ok;
+                } finally {
+                    K2.K.VirtualProtectEx(h, p, size, old.getValue(), new IntByReference());
+                }
             } finally {
                 lock.readLock().unlock();
             }
