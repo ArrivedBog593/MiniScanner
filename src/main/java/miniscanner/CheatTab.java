@@ -1,11 +1,17 @@
 package miniscanner;
 
 import javax.swing.*;
+import javax.swing.event.AncestorEvent;
+import javax.swing.event.AncestorListener;
 import javax.swing.table.AbstractTableModel;
 import java.awt.*;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static miniscanner.Ui.*;
@@ -17,6 +23,7 @@ final class CheatTab extends JPanel {
     private File cheatFile;
     private final CheatTableModel model = new CheatTableModel();
     private final JTable table = new JTable(model);
+    private final Win.Hotkeys hotkeys = new Win.Hotkeys(this::hotkeyPressed, this::hotkeysFailed);
 
     CheatTab(MiniScanner app) {
         super(new BorderLayout());
@@ -26,6 +33,7 @@ final class CheatTab extends JPanel {
         table.getColumnModel().getColumn(2).setPreferredWidth(300);
         JPanel south = new JPanel(new GridLayout(0, 1));
         south.add(row(button("Agregar dirección...", this::addManualEntry), button("Eliminar", this::deleteCheats),
+                button("Tecla rápida...", this::editHotkey),
                 button("Buscar pointers de esta", this::cheatToPointers), button("Ver en memoria", () -> {
                     int r = table.getSelectedRow();
                     long a = r < 0 ? Win.BAD : cheats.get(r).address.resolve(app.proc);
@@ -33,7 +41,8 @@ final class CheatTab extends JPanel {
                 })));
         south.add(row(button("Abrir tabla (.CT)...", this::loadTable), button("Guardar tabla", () -> saveTable(false)),
                 button("Guardar como...", () -> saveTable(true))));
-        JLabel help = new JLabel(" Doble clic en Descripción o Valor para editarlos. Marca «Congelar» para fijar el valor.");
+        JLabel help = new JLabel(" Doble clic en Descripción o Valor para editarlos. Marca «Congelar» para fijar el valor."
+                + " Las teclas rápidas funcionan aunque estés dentro del juego.");
         add(help, BorderLayout.NORTH);
         add(new JScrollPane(table), BorderLayout.CENTER);
         add(south, BorderLayout.SOUTH);
@@ -50,7 +59,19 @@ final class CheatTab extends JPanel {
 
     void addAll(List<CheatEntry> entries) {
         cheats.addAll(entries);
+        changed();
+    }
+
+    /** Las filas cambiaron (se agregaron, quitaron o cambiaron sus teclas). */
+    private void changed() {
         model.fireTableDataChanged();
+        updateHotkeys();
+    }
+
+    private void updateHotkeys() {
+        Set<Integer> combos = new HashSet<>();
+        for (CheatEntry e : cheats) if (e.hotkey != null) combos.add(e.hotkey.combo());
+        hotkeys.set(combos);
     }
 
     /** Descongela las direcciones absolutas (eran del proceso anterior). Devuelve cuántas. */
@@ -64,7 +85,7 @@ final class CheatTab extends JPanel {
 
     // ------------------------------------------------------------ modelo
     final class CheatTableModel extends AbstractTableModel {
-        final String[] cols = {"Congelar", "Descripción", "Dirección", "Tipo", "Valor"};
+        final String[] cols = {"Congelar", "Descripción", "Dirección", "Tipo", "Valor", "Tecla"};
         public int getRowCount() { return cheats.size(); }
         public int getColumnCount() { return cols.length; }
         @Override public String getColumnName(int c) { return cols[c]; }
@@ -79,30 +100,129 @@ final class CheatTab extends JPanel {
                 case 1 -> e.description;
                 case 2 -> e.address.toString();
                 case 3 -> e.type.ctName;
-                default -> app.readText(e.address.resolve(app.proc), e.type);
+                case 4 -> app.readText(e.address.resolve(app.proc), e.type);
+                default -> e.hotkey == null ? "" : e.hotkey.toString();
             };
         }
 
         @Override public void setValueAt(Object v, int r, int c) {
             CheatEntry e = cheats.get(r);
-            Win.Proc proc = app.proc;
             if (c == 1) e.description = String.valueOf(v);
             else if (c == 0) {
-                if (Boolean.TRUE.equals(v)) {
-                    long a = e.address.resolve(proc);
-                    byte[] raw = a == Win.BAD ? null : proc.read(a, e.type.size);
-                    if (raw == null) { app.setStatus(" No se pudo leer esa dirección (¿abriste el juego?)."); return; }
-                    e.frozenValue = raw;
-                } else e.frozenValue = null;
+                if (!setFrozen(e, Boolean.TRUE.equals(v))) app.setStatus(" No se pudo leer esa dirección (¿abriste el juego?).");
             } else if (c == 4) {
                 try {
-                    byte[] data = e.type.encode(e.type.parse(String.valueOf(v)));
-                    long a = e.address.resolve(proc);
-                    if (a == Win.BAD || !proc.write(a, data)) { app.setStatus(" No se pudo escribir en esa dirección."); return; }
-                    if (e.frozenValue != null) e.frozenValue = data;
+                    if (!writeValue(e, String.valueOf(v))) app.setStatus(" No se pudo escribir en esa dirección.");
                 } catch (NumberFormatException ex) { app.error("Valor inválido para " + e.type.label); }
             }
             fireTableRowsUpdated(r, r);
+        }
+    }
+
+    /** Congela la entrada en su valor actual, o la descongela. false si no se pudo leer. */
+    private boolean setFrozen(CheatEntry e, boolean on) {
+        if (!on) { e.frozenValue = null; return true; }
+        Win.Proc proc = app.proc;
+        long a = e.address.resolve(proc);
+        byte[] raw = a == Win.BAD ? null : proc.read(a, e.type.size);
+        if (raw == null) return false;
+        e.frozenValue = raw;
+        return true;
+    }
+
+    /** Escribe el valor (y si está congelada, la deja congelada en él). false si no se pudo escribir. */
+    private boolean writeValue(CheatEntry e, String text) {
+        byte[] data = e.type.encode(e.type.parse(text));
+        Win.Proc proc = app.proc;
+        long a = e.address.resolve(proc);
+        if (a == Win.BAD || !proc.write(a, data)) return false;
+        if (e.frozenValue != null) e.frozenValue = data;
+        return true;
+    }
+
+    // ------------------------------------------------------------ teclas rápidas
+    private void hotkeyPressed(int combo) {
+        List<String> done = new ArrayList<>();
+        for (CheatEntry e : cheats) {
+            Hotkey hk = e.hotkey;
+            if (hk == null || hk.combo() != combo) continue;
+            boolean ok = hk.action() == Hotkey.Action.TOGGLE ? setFrozen(e, e.frozenValue == null) : writeValue(e, hk.value());
+            done.add(e.description + (!ok ? " (no se pudo)" : hk.action() == Hotkey.Action.SET ? " = " + hk.value()
+                    : e.frozenValue != null ? " congelado" : " descongelado"));
+        }
+        if (done.isEmpty()) return;
+        model.fireTableDataChanged();
+        app.setStatus(" " + Hotkey.keyText(combo >> 8, combo & 0xFF) + ": " + String.join(", ", done));
+    }
+
+    private void hotkeysFailed(Set<Integer> combos) {
+        List<String> names = new ArrayList<>();
+        for (int c : combos) names.add(Hotkey.keyText(c >> 8, c & 0xFF));
+        app.setStatus(" No se pudo usar " + String.join(", ", names) + ": otro programa ya usa esa tecla. Elige otra.");
+    }
+
+    void editHotkey() {
+        int[] rows = table.getSelectedRows();
+        if (rows.length == 0) { app.info("Selecciona una o más entradas de la tabla."); return; }
+        List<CheatEntry> sel = new ArrayList<>();
+        for (int r : rows) sel.add(cheats.get(r));
+        Hotkey cur = sel.get(0).hotkey;
+
+        int[] key = cur == null ? new int[]{0, 0} : new int[]{cur.mods(), cur.vk()}; // {mods, vk}; vk 0 = ninguna
+        JTextField keyField = new JTextField(cur == null ? "" : cur.keyText(), 14);
+        keyField.setEditable(false);
+        keyField.addKeyListener(new KeyAdapter() {
+            @Override public void keyPressed(KeyEvent ev) {
+                int vk = ev.getKeyCode();
+                if (vk == KeyEvent.VK_DELETE || vk == KeyEvent.VK_BACK_SPACE) { key[0] = key[1] = 0; keyField.setText(""); }
+                else if (Hotkey.supported(vk)) {
+                    key[0] = Hotkey.modsOf(ev);
+                    key[1] = vk;
+                    keyField.setText(Hotkey.keyText(key[0], vk));
+                }
+                ev.consume();
+            }
+        });
+        // Que el campo tenga el foco al abrir el diálogo, para pulsar la tecla directamente
+        keyField.addAncestorListener(new AncestorListener() {
+            public void ancestorAdded(AncestorEvent ev) { keyField.requestFocusInWindow(); }
+            public void ancestorRemoved(AncestorEvent ev) {}
+            public void ancestorMoved(AncestorEvent ev) {}
+        });
+        JRadioButton toggle = new JRadioButton("Congelar / descongelar", cur == null || cur.action() == Hotkey.Action.TOGGLE);
+        JRadioButton set = new JRadioButton("Poner el valor:", !toggle.isSelected());
+        ButtonGroup group = new ButtonGroup();
+        group.add(toggle);
+        group.add(set);
+        JTextField valueField = new JTextField(cur != null && cur.value() != null ? cur.value() : "", 10);
+
+        JPanel form = new JPanel(new GridLayout(0, 1, 4, 4));
+        form.add(new JLabel("Pulsa la combinación (F1-F12, letras, números o numpad, con Ctrl/Alt/Shift)."));
+        form.add(new JLabel("Supr o Retroceso para quitarla."));
+        form.add(keyField);
+        form.add(toggle);
+        form.add(row(set, valueField));
+
+        // Mientras el diálogo está abierto se sueltan las teclas, para poder volver a elegir una que ya se usa
+        hotkeys.set(Set.of());
+        int answer = JOptionPane.showConfirmDialog(this, form, "Tecla rápida (" + sel.size() + " entrada(s))", JOptionPane.OK_CANCEL_OPTION);
+        try {
+            if (answer != JOptionPane.OK_OPTION) return;
+            Hotkey hk = null;
+            if (key[1] != 0) {
+                String value = valueField.getText().trim();
+                if (set.isSelected())
+                    for (CheatEntry e : sel) {
+                        try { e.type.parse(value); }
+                        catch (NumberFormatException ex) { app.error("Valor inválido para " + e.type.label + ": " + value); return; }
+                    }
+                hk = new Hotkey(key[0], key[1], set.isSelected() ? Hotkey.Action.SET : Hotkey.Action.TOGGLE, set.isSelected() ? value : null);
+            }
+            for (CheatEntry e : sel) e.hotkey = hk;
+            model.fireTableDataChanged();
+            app.setStatus(hk == null ? " Tecla rápida quitada." : " Tecla rápida: " + hk + ". No olvides guardar la tabla.");
+        } finally {
+            updateHotkeys();
         }
     }
 
@@ -129,7 +249,7 @@ final class CheatTab extends JPanel {
         List<CheatEntry> victims = new ArrayList<>();
         for (int r : rows) victims.add(cheats.get(r));
         cheats.removeAll(victims);
-        model.fireTableDataChanged();
+        changed();
     }
 
     void cheatToPointers() {

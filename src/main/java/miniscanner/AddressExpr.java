@@ -116,6 +116,7 @@ final class CheatEntry {
     final AddressExpr address;
     final ValueType type;
     volatile byte[] frozenValue; // null = no congelado
+    volatile Hotkey hotkey;      // null = sin tecla rápida
 
     CheatEntry(String description, AddressExpr address, ValueType type) {
         this.description = description; this.address = address; this.type = type;

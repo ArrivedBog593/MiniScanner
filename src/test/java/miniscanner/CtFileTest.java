@@ -68,7 +68,10 @@ class CtFileTest {
     void guardarYCargarIdaYVuelta() throws Exception {
         List<CheatEntry> in = List.of(
                 new CheatEntry("Dinero <&>", new AddressExpr("Juego.exe", 0x1234, new long[]{0x10, 0x2C, 0x8}), ValueType.INT4),
-                new CheatEntry("Vida", new AddressExpr(null, 0x7FF6A1B2C3D0L, new long[0]), ValueType.DOUBLE));
+                new CheatEntry("Vida", new AddressExpr(null, 0x7FF6A1B2C3D0L, new long[0]), ValueType.DOUBLE),
+                new CheatEntry("Balas", new AddressExpr("Juego.exe", 0x20, new long[0]), ValueType.INT2));
+        in.get(0).hotkey = new Hotkey(Hotkey.MOD_CONTROL, 0x70, Hotkey.Action.TOGGLE, null);
+        in.get(2).hotkey = new Hotkey(0, '5', Hotkey.Action.SET, "999");
         File f = dir.resolve("salida.CT").toFile();
         CtFile.save(f, in);
         CtFile.LoadResult r = CtFile.load(f);
@@ -81,7 +84,32 @@ class CtFileTest {
             assertEquals(a.address.module, b.address.module);
             assertEquals(a.address.offset, b.address.offset);
             assertArrayEquals(a.address.offsets, b.address.offsets);
+            assertEquals(a.hotkey, b.hotkey);
         }
+    }
+
+    @Test
+    void cargaTeclasRapidasDeCheatEngine() throws Exception {
+        File f = write("teclas.CT", """
+                <CheatTable>
+                  <CheatEntries>
+                    <CheatEntry>
+                      <ID>0</ID><Description>"Vida"</Description><VariableType>4 Bytes</VariableType><Address>game.exe+10</Address>
+                      <Hotkeys>
+                        <Hotkey><Action>Increase Value</Action><Keys><Key>107</Key></Keys><Value>1</Value><ID>0</ID></Hotkey>
+                        <Hotkey><Action>Set Value</Action><Keys><Key>17</Key><Key>112</Key></Keys><Value>999</Value><ID>1</ID></Hotkey>
+                      </Hotkeys>
+                    </CheatEntry>
+                    <CheatEntry>
+                      <ID>1</ID><Description>"Sin tecla"</Description><VariableType>Float</VariableType><Address>game.exe+20</Address>
+                    </CheatEntry>
+                  </CheatEntries>
+                </CheatTable>
+                """);
+        CtFile.LoadResult r = CtFile.load(f);
+        // «Increase Value» no se soporta: se usa la siguiente
+        assertEquals(new Hotkey(Hotkey.MOD_CONTROL, 0x70, Hotkey.Action.SET, "999"), r.entries().get(0).hotkey);
+        assertNull(r.entries().get(1).hotkey);
     }
 
     @Test

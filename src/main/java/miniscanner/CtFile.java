@@ -61,7 +61,9 @@ final class CtFile {
                             if (o instanceof Element oe && "Offset".equals(oe.getNodeName())) offs.add(0, oe.getTextContent().trim());
                     // En los .CT los offsets van del último al primero, por eso se insertan al revés
                     if (type == null) throw new IllegalArgumentException("tipo no soportado");
-                    out.add(new CheatEntry(full, AddressExpr.parse(addr, String.join(",", offs)), type));
+                    CheatEntry ce = new CheatEntry(full, AddressExpr.parse(addr, String.join(",", offs)), type);
+                    ce.hotkey = readHotkey(e);
+                    out.add(ce);
                 } catch (Exception ex) {
                     skipped[0]++;
                 }
@@ -69,6 +71,25 @@ final class CtFile {
             Element kids = child(e, "CheatEntries");
             if (kids != null) readEntries(kids, addr == null || isScript ? full : prefix, out, skipped);
         }
+    }
+
+    /** La primera tecla rápida que MiniScanner sabe usar (Cheat Engine permite varias por entrada). */
+    private static Hotkey readHotkey(Element entry) {
+        Element hks = child(entry, "Hotkeys");
+        if (hks == null) return null;
+        for (Node n = hks.getFirstChild(); n != null; n = n.getNextSibling()) {
+            if (!(n instanceof Element hk) || !"Hotkey".equals(hk.getNodeName())) continue;
+            List<Integer> keys = new ArrayList<>();
+            Element ks = child(hk, "Keys");
+            if (ks != null)
+                for (Node k = ks.getFirstChild(); k != null; k = k.getNextSibling())
+                    if (k instanceof Element ke && "Key".equals(ke.getNodeName())) {
+                        try { keys.add(Integer.parseInt(ke.getTextContent().trim())); } catch (NumberFormatException ignored) {}
+                    }
+            Hotkey h = Hotkey.fromCe(keys, Hotkey.Action.fromCt(text(hk, "Action")), text(hk, "Value"));
+            if (h != null) return h;
+        }
+        return null;
     }
 
     static void save(File file, List<CheatEntry> entries) throws Exception {
@@ -91,6 +112,18 @@ final class CtFile {
                 long[] o = ce.address.offsets;
                 for (int i = o.length - 1; i >= 0; i--) add(doc, offs, "Offset", AddressExpr.hex(o[i]));
                 e.appendChild(offs);
+            }
+            Hotkey hk = ce.hotkey;
+            if (hk != null) {
+                Element hks = doc.createElement("Hotkeys"), h = doc.createElement("Hotkey");
+                add(doc, h, "Action", hk.action().ctName);
+                Element keys = doc.createElement("Keys");
+                for (int k : hk.ceKeys()) add(doc, keys, "Key", String.valueOf(k));
+                h.appendChild(keys);
+                if (hk.action() == Hotkey.Action.SET) add(doc, h, "Value", hk.value());
+                add(doc, h, "ID", "0");
+                hks.appendChild(h);
+                e.appendChild(hks);
             }
             list.appendChild(e);
         }

@@ -26,7 +26,12 @@ public class MiniScanner extends JFrame {
     volatile long progDone, progTotal;
     volatile String phase = "";
 
+    /** Nombre del juego que se cerró y al que hay que reconectarse cuando vuelva a abrirse (null = ninguno). */
+    private String waitingFor;
+    private long attachedAt;
+
     private final JComboBox<String> procBox = new JComboBox<>();
+    private final JCheckBox reconnectBox = new JCheckBox("Reconectar solo", prefs.getBoolean("reconnect", true));
     private final JLabel status = new JLabel(" Elige el proceso del juego y presiona Abrir.");
     private final JTabbedPane tabs = new JTabbedPane();
 
@@ -47,6 +52,9 @@ public class MiniScanner extends JFrame {
         top.add(procBox);
         top.add(button("↻", this::refreshProcs));
         top.add(button("Abrir", this::openProc));
+        reconnectBox.setToolTipText("Si el juego se cierra, vuelve a conectarse solo cuando lo abras otra vez");
+        reconnectBox.addActionListener(e -> prefs.putBoolean("reconnect", reconnectBox.isSelected()));
+        top.add(reconnectBox);
 
         scannerTab = new ScannerTab(this);
         cheatTab = new CheatTab(this);
@@ -63,6 +71,7 @@ public class MiniScanner extends JFrame {
         add(status, BorderLayout.SOUTH);
 
         refreshProcs();
+        new Timer(1000, e -> watchProcess()).start();
     }
 
     // ================================================================ helpers para las pestañas
@@ -137,18 +146,57 @@ public class MiniScanner extends JFrame {
         if (busy) return;
         int idx = procBox.getSelectedIndex();
         if (idx < 0) return;
-        Win.ProcInfo info = procs.get(idx);
+        String err = attach(procs.get(idx));
+        if (err != null) error(err);
+        else waitingFor = null;
+    }
+
+    /** Se conecta al proceso. Devuelve null si salió bien, o el mensaje de error. */
+    private String attach(Win.ProcInfo info) {
         Win.Proc np;
-        try { np = new Win.Proc(info); } catch (IllegalStateException ex) { error(ex.getMessage()); return; }
+        try { np = new Win.Proc(info); } catch (IllegalStateException ex) { return ex.getMessage(); }
         // Las direcciones absolutas eran del proceso anterior: congelarlas escribiría basura en el nuevo
         int unfrozen = cheatTab.unfreezeDynamic();
         Win.Proc old = proc;
         proc = np;
         if (old != null) old.close();
+        attachedAt = System.currentTimeMillis();
         prefs.put("lastProc", info.name());
         scannerTab.processChanged();
         status.setText(" Abierto: " + info.name() + " (" + (np.ptrSize * 8) + " bits, " + np.modules.size() + " módulos)"
                 + (unfrozen > 0 ? ". Se descongelaron " + unfrozen + " direcciones dinámicas del proceso anterior." : ""));
+        return null;
+    }
+
+    /** Cada segundo: si el juego se cerró, espera a que vuelva a abrirse con el mismo nombre y se reconecta. */
+    private void watchProcess() {
+        if (busy) return; // un escaneo a medias se queda con el proceso; se revisa al terminar
+        Win.Proc p = proc;
+        if (p != null) {
+            if (p.isAlive()) {
+                // Recién abierto, el juego sigue cargando DLLs: sin esto, sus pointers no se resolverían
+                if (System.currentTimeMillis() - attachedAt < 30_000) p.refreshModules();
+                return;
+            }
+            proc = null;
+            p.close();
+            scannerTab.processChanged();
+            waitingFor = reconnectBox.isSelected() ? p.info.name() : null;
+            status.setText(" " + p.info.name() + " se cerró." + (waitingFor != null
+                    ? " Esperando a que vuelva a abrirse para reconectar..." : ""));
+            return;
+        }
+        if (waitingFor == null || !reconnectBox.isSelected()) return;
+        for (Win.ProcInfo info : Win.listProcesses()) {
+            if (!info.name().equalsIgnoreCase(waitingFor)) continue;
+            // Si falla (p. ej. el juego aún está arrancando), se reintenta en el siguiente segundo
+            if (attach(info) == null) {
+                waitingFor = null;
+                refreshProcs();
+                status.setText(status.getText() + " Reconectado: la tabla de trucos sigue funcionando.");
+            }
+            return;
+        }
     }
 
     // ================================================================ main

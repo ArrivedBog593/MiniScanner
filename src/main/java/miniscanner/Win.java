@@ -6,18 +6,27 @@ import com.sun.jna.Pointer;
 import com.sun.jna.platform.win32.BaseTSD;
 import com.sun.jna.platform.win32.Kernel32;
 import com.sun.jna.platform.win32.Tlhelp32;
+import com.sun.jna.platform.win32.User32;
 import com.sun.jna.platform.win32.WinDef;
 import com.sun.jna.platform.win32.WinNT;
 import com.sun.jna.platform.win32.WinNT.HANDLE;
+import com.sun.jna.platform.win32.WinUser;
 import com.sun.jna.ptr.IntByReference;
 
+import javax.swing.SwingUtilities;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.function.IntConsumer;
 
-/** Todo lo que habla con Windows: procesos, módulos y memoria. */
+/** Todo lo que habla con Windows: procesos, módulos, memoria y teclas rápidas globales. */
 final class Win {
     private Win() {}
 
@@ -29,6 +38,7 @@ final class Win {
     static final int MEM_COMMIT = 0x1000, MEM_IMAGE = 0x1000000, PAGE_NOACCESS = 0x01, PAGE_GUARD = 0x100;
     static final int WRITABLE = 0x04 | 0x08 | 0x40 | 0x80;
     static final int PAGE = 0x1000;
+    static final int STILL_ACTIVE = 259;
 
     /** Funciones no documentadas de ntdll para pausar/reanudar un proceso completo. */
     interface NtDll extends com.sun.jna.Library {
@@ -84,6 +94,12 @@ final class Win {
         volatile boolean suspended;
 
         void close() { resume(); if (h != null) { K.K32.CloseHandle(h); h = null; } }
+
+        /** false cuando el juego ya se cerró. */
+        boolean isAlive() {
+            IntByReference code = new IntByReference();
+            return h != null && K.K32.GetExitCodeProcess(h, code) && code.getValue() == STILL_ACTIVE;
+        }
 
         /** Pausa todo el juego (para escanear valores que cambian muy rápido). */
         synchronized void suspend() {
@@ -179,6 +195,65 @@ final class Win {
             Memory mem = new Memory(data.length);
             mem.write(0, data, 0, data.length);
             return K.K32.WriteProcessMemory(h, new Pointer(addr), mem, data.length, new IntByReference());
+        }
+    }
+
+    /**
+     * Teclas rápidas globales (RegisterHotKey). Windows avisa de cada pulsación al hilo que registró la tecla,
+     * así que todo pasa en un hilo propio con su bucle de mensajes; los avisos se entregan en el hilo de Swing.
+     */
+    static final class Hotkeys {
+        private static final int WM_HOTKEY = 0x0312, WM_APP = 0x8000, MOD_NOREPEAT = 0x4000;
+
+        private final IntConsumer onPress;
+        private final Consumer<Set<Integer>> onFailed;
+        private final AtomicReference<Set<Integer>> pending = new AtomicReference<>();
+        private final CountDownLatch ready = new CountDownLatch(1);
+        private volatile int threadId;
+
+        /**
+         * @param onPress  recibe la combinación pulsada ({@link Hotkey#combo()})
+         * @param onFailed recibe las combinaciones que no se pudieron registrar (otro programa ya las usa)
+         */
+        Hotkeys(IntConsumer onPress, Consumer<Set<Integer>> onFailed) {
+            this.onPress = onPress;
+            this.onFailed = onFailed;
+            Thread t = new Thread(this::loop, "teclas rápidas");
+            t.setDaemon(true);
+            t.start();
+            try { ready.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
+
+        /** Deja registradas exactamente estas combinaciones (suelta las demás). */
+        void set(Set<Integer> combos) {
+            pending.set(Set.copyOf(combos));
+            User32.INSTANCE.PostThreadMessage(threadId, WM_APP, new WinDef.WPARAM(0), new WinDef.LPARAM(0));
+        }
+
+        private void loop() {
+            threadId = K.K32.GetCurrentThreadId();
+            WinUser.MSG msg = new WinUser.MSG();
+            User32.INSTANCE.PeekMessage(msg, null, 0, 0, 0); // crea la cola de mensajes antes de recibir set()
+            ready.countDown();
+            Set<Integer> registered = new HashSet<>();
+            while (User32.INSTANCE.GetMessage(msg, null, 0, 0) > 0) {
+                if (msg.message == WM_HOTKEY) {
+                    int combo = msg.wParam.intValue();
+                    SwingUtilities.invokeLater(() -> onPress.accept(combo));
+                } else if (msg.message == WM_APP) {
+                    Set<Integer> want = pending.getAndSet(null);
+                    if (want == null) continue;
+                    for (int c : registered) User32.INSTANCE.UnregisterHotKey(null, c);
+                    registered.clear();
+                    Set<Integer> failed = new HashSet<>();
+                    for (int c : want) {
+                        // El id es la propia combinación: (mods << 8 | vk) siempre cabe en el rango 0..0xBFFF
+                        if (User32.INSTANCE.RegisterHotKey(null, c, (c >> 8) | MOD_NOREPEAT, c & 0xFF)) registered.add(c);
+                        else failed.add(c);
+                    }
+                    if (!failed.isEmpty()) SwingUtilities.invokeLater(() -> onFailed.accept(failed));
+                }
+            }
         }
     }
 }
