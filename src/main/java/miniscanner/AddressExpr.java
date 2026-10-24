@@ -117,6 +117,8 @@ final class CheatEntry {
     final ValueType type;
     volatile byte[] frozenValue; // null = no congelado
     volatile Hotkey hotkey;      // null = sin tecla rápida
+    /** Grupo donde está, desde la raíz: [] = sin grupo, ["Jugador", "Armas"] = dentro de Jugador / Armas. */
+    volatile List<String> group = List.of();
 
     CheatEntry(String description, AddressExpr address, ValueType type) {
         this.description = description; this.address = address; this.type = type;

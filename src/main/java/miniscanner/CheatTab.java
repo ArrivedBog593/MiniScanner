@@ -1,26 +1,42 @@
 package miniscanner;
 
 import javax.swing.*;
+import javax.swing.border.EmptyBorder;
 import javax.swing.event.AncestorEvent;
 import javax.swing.event.AncestorListener;
 import javax.swing.table.AbstractTableModel;
+import javax.swing.table.DefaultTableCellRenderer;
 import java.awt.*;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static miniscanner.Ui.*;
 
-/** Pestaña Tabla de trucos: entradas guardables en .CT, con valores editables y congelables. */
+/**
+ * Pestaña Tabla de trucos: entradas guardables en .CT, con valores editables y congelables,
+ * organizadas en grupos que se expanden y contraen como en Cheat Engine.
+ */
 final class CheatTab extends JPanel {
     private final MiniScanner app;
+    /** Todas las entradas (el orden de la tabla sale de CheatTree, que las agrupa). */
     final List<CheatEntry> cheats = new CopyOnWriteArrayList<>();
     private File cheatFile;
+
+    /** Una fila visible: un grupo (group != null) o una entrada, con su nivel de sangría. */
+    private record Row(int depth, CheatTree group, CheatEntry entry) {}
+    private List<Row> rows = List.of();
+    private final Set<List<String>> collapsed = new HashSet<>();
+
     private final CheatTableModel model = new CheatTableModel();
     private final JTable table = new JTable(model);
     private final Win.Hotkeys hotkeys = new Win.Hotkeys(this::hotkeyPressed, this::hotkeysFailed);
@@ -29,20 +45,43 @@ final class CheatTab extends JPanel {
         super(new BorderLayout());
         this.app = app;
         table.getColumnModel().getColumn(0).setMaxWidth(70);
+        table.getColumnModel().getColumn(1).setPreferredWidth(220);
         table.getColumnModel().getColumn(3).setMaxWidth(80);
         table.getColumnModel().getColumn(2).setPreferredWidth(300);
+        table.getColumnModel().getColumn(1).setCellRenderer(new DefaultTableCellRenderer() {
+            @Override public Component getTableCellRendererComponent(JTable t, Object v, boolean sel, boolean foc, int r, int c) {
+                Component comp = super.getTableCellRendererComponent(t, v, sel, foc, r, c);
+                Row row = r < rows.size() ? rows.get(r) : null;
+                setBorder(new EmptyBorder(0, 4 + (row == null ? 0 : row.depth()) * 18, 0, 0));
+                comp.setFont(row != null && row.group() != null ? t.getFont().deriveFont(Font.BOLD) : t.getFont());
+                return comp;
+            }
+        });
+        // Un clic en el nombre de un grupo lo expande o lo contrae
+        table.addMouseListener(new MouseAdapter() {
+            @Override public void mouseClicked(MouseEvent ev) {
+                int r = table.rowAtPoint(ev.getPoint()), c = table.columnAtPoint(ev.getPoint());
+                if (ev.getClickCount() != 1) return; // con doble clic se abriría y cerraría enseguida
+                if (r < 0 || c != 1 || r >= rows.size() || rows.get(r).group() == null) return;
+                List<String> path = rows.get(r).group().path;
+                if (!collapsed.remove(path)) collapsed.add(path);
+                rebuild();
+                table.setRowSelectionInterval(r, r);
+            }
+        });
+
         JPanel south = new JPanel(new GridLayout(0, 1));
         south.add(row(button("Agregar dirección...", this::addManualEntry), button("Eliminar", this::deleteCheats),
-                button("Tecla rápida...", this::editHotkey),
+                button("Mover a grupo...", this::moveToGroup), button("Tecla rápida...", this::editHotkey),
                 button("Buscar pointers de esta", this::cheatToPointers), button("Ver en memoria", () -> {
-                    int r = table.getSelectedRow();
-                    long a = r < 0 ? Win.BAD : cheats.get(r).address.resolve(app.proc);
+                    CheatEntry e = selectedEntry();
+                    long a = e == null ? Win.BAD : e.address.resolve(app.proc);
                     if (a != Win.BAD) app.memoryTab.showAddress(a);
                 })));
         south.add(row(button("Abrir tabla (.CT)...", this::loadTable), button("Guardar tabla", () -> saveTable(false)),
                 button("Guardar como...", () -> saveTable(true))));
-        JLabel help = new JLabel(" Doble clic en Descripción o Valor para editarlos. Marca «Congelar» para fijar el valor."
-                + " Las teclas rápidas funcionan aunque estés dentro del juego.");
+        JLabel help = new JLabel(" Doble clic en Descripción o Valor para editarlos. Marca «Congelar» para fijar el valor"
+                + " (en un grupo, todo lo que tiene). Clic en un grupo para abrirlo o cerrarlo.");
         add(help, BorderLayout.NORTH);
         add(new JScrollPane(table), BorderLayout.CENTER);
         add(south, BorderLayout.SOUTH);
@@ -52,8 +91,7 @@ final class CheatTab extends JPanel {
         freezer.start();
         // refresca los valores mientras la pestaña está a la vista
         new Timer(300, e -> {
-            if (isShowing() && !table.isEditing() && model.getRowCount() > 0)
-                model.fireTableRowsUpdated(0, model.getRowCount() - 1);
+            if (isShowing() && !table.isEditing()) refreshRows();
         }).start();
     }
 
@@ -62,10 +100,32 @@ final class CheatTab extends JPanel {
         changed();
     }
 
-    /** Las filas cambiaron (se agregaron, quitaron o cambiaron sus teclas). */
+    /** Las entradas cambiaron (se agregaron, quitaron, movieron o cambiaron sus teclas). */
     private void changed() {
-        model.fireTableDataChanged();
+        rebuild();
         updateHotkeys();
+    }
+
+    /** Vuelve a armar las filas visibles a partir de los grupos. */
+    private void rebuild() {
+        List<Row> out = new ArrayList<>();
+        addRows(CheatTree.of(cheats), 0, out);
+        rows = out;
+        model.fireTableDataChanged();
+    }
+
+    private void addRows(CheatTree node, int depth, List<Row> out) {
+        for (Object o : node.children) {
+            if (o instanceof CheatEntry e) { out.add(new Row(depth, null, e)); continue; }
+            CheatTree g = (CheatTree) o;
+            out.add(new Row(depth, g, null));
+            if (!collapsed.contains(g.path)) addRows(g, depth + 1, out);
+        }
+    }
+
+    /** Repinta valores y casillas sin perder la selección. */
+    private void refreshRows() {
+        if (!rows.isEmpty()) model.fireTableRowsUpdated(0, rows.size() - 1);
     }
 
     private void updateHotkeys() {
@@ -79,22 +139,54 @@ final class CheatTab extends JPanel {
         int n = 0;
         for (CheatEntry e : cheats)
             if (e.frozenValue != null && e.address.module == null) { e.frozenValue = null; n++; }
-        if (n > 0) model.fireTableDataChanged();
+        if (n > 0) refreshRows();
         return n;
+    }
+
+    // ------------------------------------------------------------ selección
+    /** Entradas seleccionadas; un grupo seleccionado cuenta con todas sus entradas. */
+    private List<CheatEntry> selectedEntries() {
+        Set<CheatEntry> out = new LinkedHashSet<>();
+        for (int r : table.getSelectedRows()) {
+            if (r >= rows.size()) continue;
+            Row row = rows.get(r);
+            if (row.entry() != null) out.add(row.entry());
+            else out.addAll(row.group().entries());
+        }
+        return new ArrayList<>(out);
+    }
+
+    /** La primera entrada (no grupo) seleccionada, o null. */
+    private CheatEntry selectedEntry() {
+        for (int r : table.getSelectedRows()) if (r < rows.size() && rows.get(r).entry() != null) return rows.get(r).entry();
+        return null;
     }
 
     // ------------------------------------------------------------ modelo
     final class CheatTableModel extends AbstractTableModel {
         final String[] cols = {"Congelar", "Descripción", "Dirección", "Tipo", "Valor", "Tecla"};
-        public int getRowCount() { return cheats.size(); }
+        public int getRowCount() { return rows.size(); }
         public int getColumnCount() { return cols.length; }
         @Override public String getColumnName(int c) { return cols[c]; }
         @Override public Class<?> getColumnClass(int c) { return c == 0 ? Boolean.class : String.class; }
-        @Override public boolean isCellEditable(int r, int c) { return c == 0 || c == 1 || c == 4; }
+
+        @Override public boolean isCellEditable(int r, int c) {
+            if (r >= rows.size()) return false;
+            return rows.get(r).group() != null ? c == 0 : c == 0 || c == 1 || c == 4;
+        }
 
         public Object getValueAt(int r, int c) {
-            if (r >= cheats.size()) return "";
-            CheatEntry e = cheats.get(r);
+            if (r >= rows.size()) return c == 0 ? Boolean.FALSE : "";
+            Row row = rows.get(r);
+            if (row.group() != null) {
+                List<CheatEntry> all = row.group().entries();
+                return switch (c) {
+                    case 0 -> !all.isEmpty() && all.stream().allMatch(e -> e.frozenValue != null);
+                    case 1 -> (collapsed.contains(row.group().path) ? "▶ " : "▼ ") + row.group().name + "  (" + all.size() + ")";
+                    default -> "";
+                };
+            }
+            CheatEntry e = row.entry();
             return switch (c) {
                 case 0 -> e.frozenValue != null;
                 case 1 -> e.description;
@@ -106,7 +198,17 @@ final class CheatTab extends JPanel {
         }
 
         @Override public void setValueAt(Object v, int r, int c) {
-            CheatEntry e = cheats.get(r);
+            if (r >= rows.size()) return;
+            Row row = rows.get(r);
+            if (row.group() != null) {
+                if (c != 0) return;
+                int failed = 0;
+                for (CheatEntry e : row.group().entries()) if (!setFrozen(e, Boolean.TRUE.equals(v))) failed++;
+                if (failed > 0) app.setStatus(" No se pudieron leer " + failed + " entradas del grupo (¿abriste el juego?).");
+                refreshRows();
+                return;
+            }
+            CheatEntry e = row.entry();
             if (c == 1) e.description = String.valueOf(v);
             else if (c == 0) {
                 if (!setFrozen(e, Boolean.TRUE.equals(v))) app.setStatus(" No se pudo leer esa dirección (¿abriste el juego?).");
@@ -115,7 +217,7 @@ final class CheatTab extends JPanel {
                     if (!writeValue(e, String.valueOf(v))) app.setStatus(" No se pudo escribir en esa dirección.");
                 } catch (NumberFormatException ex) { app.error("Valor inválido para " + e.type.label); }
             }
-            fireTableRowsUpdated(r, r);
+            refreshRows(); // la casilla del grupo depende de sus entradas
         }
     }
 
@@ -151,7 +253,7 @@ final class CheatTab extends JPanel {
                     : e.frozenValue != null ? " congelado" : " descongelado"));
         }
         if (done.isEmpty()) return;
-        model.fireTableDataChanged();
+        refreshRows();
         app.setStatus(" " + Hotkey.keyText(combo >> 8, combo & 0xFF) + ": " + String.join(", ", done));
     }
 
@@ -162,10 +264,8 @@ final class CheatTab extends JPanel {
     }
 
     void editHotkey() {
-        int[] rows = table.getSelectedRows();
-        if (rows.length == 0) { app.info("Selecciona una o más entradas de la tabla."); return; }
-        List<CheatEntry> sel = new ArrayList<>();
-        for (int r : rows) sel.add(cheats.get(r));
+        List<CheatEntry> sel = selectedEntries();
+        if (sel.isEmpty()) { app.info("Selecciona una o más entradas (o un grupo) de la tabla."); return; }
         Hotkey cur = sel.get(0).hotkey;
 
         int[] key = cur == null ? new int[]{0, 0} : new int[]{cur.mods(), cur.vk()}; // {mods, vk}; vk 0 = ninguna
@@ -219,7 +319,7 @@ final class CheatTab extends JPanel {
                 hk = new Hotkey(key[0], key[1], set.isSelected() ? Hotkey.Action.SET : Hotkey.Action.TOGGLE, set.isSelected() ? value : null);
             }
             for (CheatEntry e : sel) e.hotkey = hk;
-            model.fireTableDataChanged();
+            refreshRows();
             app.setStatus(hk == null ? " Tecla rápida quitada." : " Tecla rápida: " + hk + ". No olvides guardar la tabla.");
         } finally {
             updateHotkeys();
@@ -243,19 +343,41 @@ final class CheatTab extends JPanel {
     }
 
     void deleteCheats() {
-        int[] rows = table.getSelectedRows();
-        if (rows.length == 0) return;
+        List<CheatEntry> victims = selectedEntries();
+        if (victims.isEmpty()) return;
         if (table.isEditing()) table.getCellEditor().cancelCellEditing();
-        List<CheatEntry> victims = new ArrayList<>();
-        for (int r : rows) victims.add(cheats.get(r));
+        boolean group = false;
+        for (int r : table.getSelectedRows()) group |= r < rows.size() && rows.get(r).group() != null;
+        if (group && JOptionPane.showConfirmDialog(this, "¿Eliminar " + victims.size() + " entradas (incluye grupos completos)?",
+                "Eliminar", JOptionPane.OK_CANCEL_OPTION) != JOptionPane.OK_OPTION) return;
         cheats.removeAll(victims);
         changed();
     }
 
+    void moveToGroup() {
+        List<CheatEntry> sel = selectedEntries();
+        if (sel.isEmpty()) { app.info("Selecciona una o más entradas (o un grupo) de la tabla."); return; }
+        Set<String> existing = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        for (CheatEntry e : cheats)
+            for (int i = 1; i <= e.group.size(); i++) existing.add(CheatTree.pathText(e.group.subList(0, i)));
+        JComboBox<String> box = new JComboBox<>(existing.toArray(new String[0]));
+        box.setEditable(true);
+        box.setSelectedItem(CheatTree.pathText(sel.get(0).group));
+        JPanel form = new JPanel(new GridLayout(0, 1, 4, 4));
+        form.add(new JLabel("Grupo (usa « / » para subgrupos, p. ej. Jugador / Armas; vacío = sin grupo):"));
+        form.add(box);
+        if (JOptionPane.showConfirmDialog(this, form, "Mover " + sel.size() + " entrada(s) a un grupo",
+                JOptionPane.OK_CANCEL_OPTION) != JOptionPane.OK_OPTION) return;
+        Object text = box.getEditor().getItem();
+        List<String> path = CheatTree.parsePath(text == null ? "" : text.toString());
+        for (CheatEntry e : sel) e.group = path;
+        changed();
+        app.setStatus(path.isEmpty() ? " Entradas sacadas de su grupo." : " Movidas a «" + CheatTree.pathText(path) + "».");
+    }
+
     void cheatToPointers() {
-        int r = table.getSelectedRow();
-        if (r < 0 || app.proc == null) { app.info("Abre el juego y selecciona una entrada."); return; }
-        CheatEntry e = cheats.get(r);
+        CheatEntry e = selectedEntry();
+        if (e == null || app.proc == null) { app.info("Abre el juego y selecciona una entrada."); return; }
         long a = e.address.resolve(app.proc);
         if (a == Win.BAD) { app.error("Esa entrada no apunta a nada válido ahora mismo."); return; }
         app.pointerTab.setTarget(a, e.type);

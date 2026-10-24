@@ -58,7 +58,9 @@ class CtFileTest {
         assertArrayEquals(new long[]{0x2C, 0x10}, dinero.address.offsets);
 
         CheatEntry vida = r.entries().get(1);
-        assertEquals("Jugador / Vida", vida.description);
+        assertEquals("Vida", vida.description);
+        assertEquals(List.of("Jugador"), vida.group);
+        assertEquals(List.of(), dinero.group);
         assertEquals(ValueType.FLOAT, vida.type);
         assertNull(vida.address.module);
         assertEquals(0x7FF600001000L, vida.address.offset);
@@ -72,6 +74,8 @@ class CtFileTest {
                 new CheatEntry("Balas", new AddressExpr("Juego.exe", 0x20, new long[0]), ValueType.INT2));
         in.get(0).hotkey = new Hotkey(Hotkey.MOD_CONTROL, 0x70, Hotkey.Action.TOGGLE, null);
         in.get(2).hotkey = new Hotkey(0, '5', Hotkey.Action.SET, "999");
+        in.get(1).group = List.of("Jugador");
+        in.get(2).group = List.of("Jugador", "Armas");
         File f = dir.resolve("salida.CT").toFile();
         CtFile.save(f, in);
         CtFile.LoadResult r = CtFile.load(f);
@@ -85,7 +89,12 @@ class CtFileTest {
             assertEquals(a.address.offset, b.address.offset);
             assertArrayEquals(a.address.offsets, b.address.offsets);
             assertEquals(a.hotkey, b.hotkey);
+            assertEquals(a.group, b.group);
         }
+        // Los grupos se guardan como en Cheat Engine: una entrada GroupHeader con sus hijos dentro
+        String xml = java.nio.file.Files.readString(f.toPath());
+        assertTrue(xml.contains("<GroupHeader>1</GroupHeader>"));
+        assertEquals(2, xml.split("<GroupHeader>", -1).length - 1);
     }
 
     @Test

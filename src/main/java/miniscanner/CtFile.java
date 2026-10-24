@@ -37,16 +37,18 @@ final class CtFile {
         List<CheatEntry> out = new ArrayList<>();
         int[] skipped = {0};
         Element entries = child(root, "CheatEntries");
-        if (entries != null) readEntries(entries, "", out, skipped);
+        if (entries != null) readEntries(entries, List.of(), out, skipped);
         return new LoadResult(out, skipped[0]);
     }
 
-    private static void readEntries(Element entries, String prefix, List<CheatEntry> out, int[] skipped) {
+    /** @param group el grupo de las entradas de este nivel (las entradas sin dirección son grupos) */
+    private static void readEntries(Element entries, List<String> group, List<CheatEntry> out, int[] skipped) {
         for (Node n = entries.getFirstChild(); n != null; n = n.getNextSibling()) {
             if (!(n instanceof Element e) || !"CheatEntry".equals(e.getNodeName())) continue;
             String desc = unquote(text(e, "Description"));
             if (desc == null || desc.isBlank()) desc = "Sin nombre";
-            String full = prefix.isEmpty() ? desc : prefix + " / " + desc;
+            List<String> sub = new ArrayList<>(group);
+            sub.add(desc);
 
             boolean isScript = child(e, "AssemblerScript") != null;
             String addr = text(e, "Address");
@@ -61,15 +63,17 @@ final class CtFile {
                             if (o instanceof Element oe && "Offset".equals(oe.getNodeName())) offs.add(0, oe.getTextContent().trim());
                     // En los .CT los offsets van del último al primero, por eso se insertan al revés
                     if (type == null) throw new IllegalArgumentException("tipo no soportado");
-                    CheatEntry ce = new CheatEntry(full, AddressExpr.parse(addr, String.join(",", offs)), type);
+                    CheatEntry ce = new CheatEntry(desc, AddressExpr.parse(addr, String.join(",", offs)), type);
                     ce.hotkey = readHotkey(e);
+                    ce.group = group;
                     out.add(ce);
                 } catch (Exception ex) {
                     skipped[0]++;
                 }
             }
+            // Los hijos de un grupo (o de un script) van dentro de él; los de una dirección quedan a su lado
             Element kids = child(e, "CheatEntries");
-            if (kids != null) readEntries(kids, addr == null || isScript ? full : prefix, out, skipped);
+            if (kids != null) readEntries(kids, addr == null || isScript ? List.copyOf(sub) : group, out, skipped);
         }
     }
 
@@ -100,10 +104,29 @@ final class CtFile {
         doc.appendChild(root);
         Element list = doc.createElement("CheatEntries");
         root.appendChild(list);
-        int id = 0;
-        for (CheatEntry ce : entries) {
+        writeTree(doc, list, CheatTree.of(entries), new int[]{0});
+        Transformer t = TransformerFactory.newInstance().newTransformer();
+        t.setOutputProperty(OutputKeys.INDENT, "yes");
+        t.setOutputProperty(OutputKeys.ENCODING, "utf-8");
+        t.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "2");
+        t.transform(new DOMSource(doc), new StreamResult(file));
+    }
+
+    /** Escribe los hijos del grupo; los subgrupos van como en Cheat Engine: GroupHeader con sus CheatEntries dentro. */
+    private static void writeTree(Document doc, Element list, CheatTree node, int[] id) {
+        for (Object child : node.children) {
             Element e = doc.createElement("CheatEntry");
-            add(doc, e, "ID", String.valueOf(id++));
+            add(doc, e, "ID", String.valueOf(id[0]++));
+            if (child instanceof CheatTree g) {
+                add(doc, e, "Description", "\"" + g.name + "\"");
+                add(doc, e, "GroupHeader", "1");
+                Element kids = doc.createElement("CheatEntries");
+                writeTree(doc, kids, g, id);
+                e.appendChild(kids);
+                list.appendChild(e);
+                continue;
+            }
+            CheatEntry ce = (CheatEntry) child;
             add(doc, e, "Description", "\"" + ce.description + "\"");
             add(doc, e, "VariableType", ce.type.ctName);
             add(doc, e, "Address", ce.address.baseText());
@@ -127,11 +150,6 @@ final class CtFile {
             }
             list.appendChild(e);
         }
-        Transformer t = TransformerFactory.newInstance().newTransformer();
-        t.setOutputProperty(OutputKeys.INDENT, "yes");
-        t.setOutputProperty(OutputKeys.ENCODING, "utf-8");
-        t.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "2");
-        t.transform(new DOMSource(doc), new StreamResult(file));
     }
 
     // ------------------------------------------------------------ helpers XML
