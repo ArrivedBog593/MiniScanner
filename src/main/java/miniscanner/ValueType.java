@@ -52,7 +52,14 @@ enum ValueType {
         s = s.trim();
         // En floats la coma es decimal ("1,5" = 1.5); "1.000,5" falla en vez de dar un número equivocado
         if (isFloat) return Double.parseDouble(s.replace(',', '.'));
-        long v = Long.parseLong(s.replace(",", ""));
+        return fromLong(Long.parseLong(s.replace(",", "")));
+    }
+
+    /**
+     * Valida el rango de un entero y lo deja como lo devuelve get(), para que las comparaciones
+     * coincidan: Byte sin signo ("-1" = 255) y 2/4 bytes con signo ("4294967295" = -1).
+     */
+    double fromLong(long v) {
         boolean ok = switch (this) {
             case BYTE -> v >= -128 && v <= 255;
             case INT2 -> v >= Short.MIN_VALUE && v <= 0xFFFF;
@@ -60,7 +67,12 @@ enum ValueType {
             default -> true;
         };
         if (!ok) throw new NumberFormatException("Fuera de rango para " + label);
-        return v;
+        return switch (this) {
+            case BYTE -> v & 0xFF;
+            case INT2 -> (short) v;
+            case INT4 -> (int) v;
+            default -> v;
+        };
     }
 
     /** Siempre con punto decimal, sin importar el idioma de Windows, para que parse() lo lea igual. */

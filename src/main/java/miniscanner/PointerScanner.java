@@ -177,7 +177,8 @@ final class PointerScanner {
         return out;
     }
 
-    static List<AddressExpr> filterByValue(Win.Proc proc, List<AddressExpr> list, ValueType type, double value, Progress p) {
+    /** @param tol tolerancia para floats, la misma que usa el escáner (MiniScanner.tolFor) */
+    static List<AddressExpr> filterByValue(Win.Proc proc, List<AddressExpr> list, ValueType type, double value, double tol, Progress p) {
         proc.refreshModules();
         List<AddressExpr> out = new ArrayList<>();
         for (int i = 0; i < list.size(); i++) {
@@ -185,7 +186,7 @@ final class PointerScanner {
             byte[] raw = a == Win.BAD ? null : proc.read(a, type.size);
             if (raw != null) {
                 double v = type.decode(raw);
-                if (type.isFloat ? Math.abs(v - value) <= 0.01 : v == value) out.add(list.get(i));
+                if (type.isFloat ? Math.abs(v - value) <= tol : v == value) out.add(list.get(i));
             }
             if ((i & 255) == 0) p.update(i, list.size());
         }

@@ -24,6 +24,8 @@ import java.util.List;
 final class Scanner implements Closeable {
     static final int CHUNK = 16 * 1024 * 1024, BLOCK = 64 * 1024;
     static final int MAX_RESULTS = 20_000_000, SPARSE_LIMIT = 2_000_000;
+    /** Bytes extra que se leen tras cada bloque (el tipo más grande) para ver valores que cruzan al siguiente. */
+    static final int OVERLAP = 8;
 
     enum Mode {
         EXACT("Valor exacto", 1), GT("Mayor que", 1), LT("Menor que", 1), BETWEEN("Entre", 2),
@@ -111,7 +113,9 @@ final class Scanner implements Closeable {
         close();
         prev = null;
         try {
-            state = m == Mode.EXACT ? new Sparse(sparseExact(v1, p)) : denseFirst(m, v1, v2, p);
+            Results r = m == Mode.EXACT ? sparseExact(v1, p) : null;
+            // Un valor muy común (0, 1...) no cabe en lista: se usa la instantánea en disco
+            state = r != null ? new Sparse(r) : denseFirst(m, v1, v2, p);
             maybeSparsify();
         } catch (IOException | RuntimeException ex) {
             close();
@@ -123,7 +127,14 @@ final class Scanner implements Closeable {
     void nextScan(Mode m, double v1, double v2, Progress p) throws IOException {
         State s = state;
         if (s == null) return;
-        State ns = s instanceof Sparse sp ? new Sparse(sparseNext(sp.r(), m, v1, v2, p)) : denseNext((Dense) s, m, v1, v2, p);
+        State ns;
+        try {
+            ns = s instanceof Sparse sp ? new Sparse(sparseNext(sp.r(), m, v1, v2, p)) : denseNext((Dense) s, m, v1, v2, p);
+        } catch (IOException | RuntimeException ex) {
+            // denseNext pudo dejar a medias el archivo de la instantánea anterior: ya no se puede volver a ella
+            if (s instanceof Dense && prev instanceof Dense) prev = null;
+            throw ex;
+        }
         prev = s;
         state = ns;
         maybeSparsify();
@@ -147,19 +158,21 @@ final class Scanner implements Closeable {
     }
 
     // ---- lista
+    /** Devuelve null si hay demasiados resultados para una lista (más de SPARSE_LIMIT). */
     private Results sparseExact(double value, Progress p) {
         Results res = new Results();
         ByteBuffer t = ByteBuffer.wrap(type.encode(value)).order(Win.LE);
         int sz = type.size, align = type.align();
-        Memory mem = new Memory(CHUNK);
+        Memory mem = new Memory(CHUNK + OVERLAP);
         List<Win.Region> regs = proc.regions(true);
         for (int r = 0; r < regs.size(); r++) {
             long base = regs.get(r).base(), size = regs.get(r).size();
             for (long off = 0; off < size; off += CHUNK) {
-                int got = proc.readInto(base + off, mem, (int) Math.min(CHUNK, size - off));
+                if (res.n > SPARSE_LIMIT) return null;
+                int got = proc.readInto(base + off, mem, (int) Math.min(CHUNK + OVERLAP, size - off));
                 if (got < sz) continue;
                 ByteBuffer b = mem.getByteBuffer(0, got).order(Win.LE);
-                int last = got - sz;
+                int last = Math.min(got - sz, CHUNK - 1); // lo que pasa de CHUNK es del siguiente bloque
                 long a0 = base + off;
                 if (type.isFloat) {
                     for (int i = 0; i <= last; i += align) {
@@ -238,12 +251,12 @@ final class Scanner implements Closeable {
         long fileOff = 0;
         for (Win.Region r : proc.regions(true))
             for (long off = 0; off < r.size(); off += CHUNK) {
-                int len = (int) Math.min(CHUNK, r.size() - off);
+                int len = (int) Math.min(CHUNK + OVERLAP, r.size() - off);
                 blocks.add(new Block(r.base() + off, len, fileOff));
                 fileOff += len;
             }
         BitSet[] bits = new BitSet[blocks.size()];
-        Memory mem = new Memory(CHUNK);
+        Memory mem = new Memory(CHUNK + OVERLAP);
         int sz = type.size, al = type.align();
         long count = 0;
         for (int i = 0; i < blocks.size(); i++) {
@@ -253,7 +266,7 @@ final class Scanner implements Closeable {
             if (got >= sz) {
                 ByteBuffer buf = mem.getByteBuffer(0, got).order(Win.LE);
                 writeFully(files[0], mem.getByteBuffer(0, got), b.fileOff());
-                int slots = (got - sz) / al + 1;
+                int slots = Math.min((got - sz) / al + 1, CHUNK / al); // los bytes de OVERLAP son del siguiente bloque
                 if (m == Mode.UNKNOWN) bs.set(0, slots);
                 else for (int k = 0; k < slots; k++) if (test(m, type.get(buf, k * al), 0, v1, v2)) bs.set(k);
                 count += bs.cardinality();
@@ -267,8 +280,8 @@ final class Scanner implements Closeable {
     private Dense denseNext(Dense old, Mode m, double v1, double v2, Progress p) throws IOException {
         int nf = 1 - old.file();
         BitSet[] nb = new BitSet[blocks.size()];
-        Memory mem = new Memory(CHUNK);
-        ByteBuffer prevBuf = ByteBuffer.allocate(CHUNK).order(Win.LE);
+        Memory mem = new Memory(CHUNK + OVERLAP);
+        ByteBuffer prevBuf = ByteBuffer.allocate(CHUNK + OVERLAP).order(Win.LE);
         int sz = type.size, al = type.align();
         long count = 0;
         for (int i = 0; i < blocks.size(); i++) {
@@ -301,7 +314,7 @@ final class Scanner implements Closeable {
     private void maybeSparsify() throws IOException {
         if (!(state instanceof Dense d) || d.count() > SPARSE_LIMIT) return;
         Results r = new Results();
-        ByteBuffer buf = ByteBuffer.allocate(CHUNK).order(Win.LE);
+        ByteBuffer buf = ByteBuffer.allocate(CHUNK + OVERLAP).order(Win.LE);
         int al = type.align();
         for (int i = 0; i < blocks.size(); i++) {
             BitSet bs = d.bits()[i];

@@ -150,10 +150,13 @@ public class MiniScanner extends JFrame {
         return m != null ? m.name() + "+" + AddressExpr.hex(a - m.base()) : AddressExpr.hex(a);
     }
 
-    String readText(long addr, ValueType t) {
+    /** Lee y formatea un valor del juego; con hex = true respeta la casilla Hex del escáner. */
+    String readText(long addr, ValueType t, boolean hex) {
         if (proc == null || addr == Win.BAD) return "??";
         byte[] raw = proc.read(addr, t.size);
-        return raw == null ? "??" : t.format(t.decode(raw));
+        if (raw == null) return "??";
+        double v = t.decode(raw);
+        return hex ? fmtVal(t, v) : t.format(v);
     }
 
     /** Ejecuta una tarea larga en segundo plano mostrando el progreso. */
@@ -268,7 +271,7 @@ public class MiniScanner extends JFrame {
     /** Lee un número del usuario respetando el tipo y la casilla Hex. */
     double parseVal(ValueType t, String s) {
         s = s.trim();
-        if (hexBox.isSelected() && !t.isFloat) return Long.parseUnsignedLong(s.replaceFirst("(?i)^0x", ""), 16);
+        if (hexBox.isSelected() && !t.isFloat) return t.fromLong(Long.parseUnsignedLong(s.replaceFirst("(?i)^0x", ""), 16));
         return t.parse(s);
     }
 
@@ -378,16 +381,10 @@ public class MiniScanner extends JFrame {
         if (scanner == null || !scanner.hasResults()) return;
         long total = scanner.count();
         shownAddrs = scanner.firstAddresses(MAX_SHOWN);
-        for (long a : shownAddrs) scanModel.addRow(new Object[]{addrText(a), readVal(a, scanner.type)});
+        for (long a : shownAddrs) scanModel.addRow(new Object[]{addrText(a), readText(a, scanner.type, true)});
         String extra = total > MAX_SHOWN ? " (mostrando los primeros " + MAX_SHOWN + ")" : "";
         String hint = scanner.isSnapshot() ? " Cambia el valor en el juego y usa Aumentó / Disminuyó / Cambió / Sin cambio." : "";
         status.setText(String.format(" %,d resultados%s.%s", total, extra, hint));
-    }
-
-    String readVal(long addr, ValueType t) {
-        if (proc == null || addr == Win.BAD) return "??";
-        byte[] raw = proc.read(addr, t.size);
-        return raw == null ? "??" : fmtVal(t, t.decode(raw));
     }
 
     void writeScanSelected() {
@@ -440,7 +437,7 @@ public class MiniScanner extends JFrame {
                 case 1 -> e.description;
                 case 2 -> e.address.toString();
                 case 3 -> e.type.ctName;
-                default -> readText(e.address.resolve(proc), e.type);
+                default -> readText(e.address.resolve(proc), e.type, false);
             };
         }
 
@@ -638,9 +635,10 @@ public class MiniScanner extends JFrame {
         ValueType t = (ValueType) ptrType.getSelectedItem();
         double v;
         try { v = t.parse(ptrValue.getText()); } catch (NumberFormatException ex) { error("Valor inválido."); return; }
+        double tol = tolFor(ptrValue.getText());
         Win.Proc p = proc;
         List<AddressExpr> src = pointers;
-        runBg("Filtrando", () -> PointerScanner.filterByValue(p, src, t, v, this::setProg), list -> { pointers = list; showPointers(); });
+        runBg("Filtrando", () -> PointerScanner.filterByValue(p, src, t, v, tol, this::setProg), list -> { pointers = list; showPointers(); });
     }
 
     void showPointers() {
@@ -650,7 +648,7 @@ public class MiniScanner extends JFrame {
         for (int i = 0; i < count; i++) {
             AddressExpr e = pointers.get(i);
             long a = e.resolve(proc);
-            ptrModel.addRow(new Object[]{e.baseText(), e.offsetsText(), a == Win.BAD ? "??" : AddressExpr.hex(a), readText(a, t)});
+            ptrModel.addRow(new Object[]{e.baseText(), e.offsetsText(), a == Win.BAD ? "??" : AddressExpr.hex(a), readText(a, t, false)});
         }
         String extra = pointers.size() > MAX_SHOWN ? " (mostrando los primeros " + MAX_SHOWN + ")" : "";
         status.setText(String.format(" %,d pointers%s.", pointers.size(), extra));

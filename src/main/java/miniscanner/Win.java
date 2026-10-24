@@ -28,6 +28,7 @@ final class Win {
     static final int PROCESS_ACCESS = 0x0010 | 0x0020 | 0x0008 | 0x0400 | 0x0800; // VM_READ|VM_WRITE|VM_OPERATION|QUERY_INFO|SUSPEND_RESUME
     static final int MEM_COMMIT = 0x1000, MEM_IMAGE = 0x1000000, PAGE_NOACCESS = 0x01, PAGE_GUARD = 0x100;
     static final int WRITABLE = 0x04 | 0x08 | 0x40 | 0x80;
+    static final int PAGE = 0x1000;
 
     /** Funciones no documentadas de ntdll para pausar/reanudar un proceso completo. */
     interface NtDll extends com.sun.jna.Library {
@@ -145,9 +146,18 @@ final class Win {
             return out;
         }
 
+        /** Lee hasta size bytes; si una parte no se puede leer, devuelve cuántos bytes seguidos sí se leyeron. */
         public int readInto(long addr, Memory mem, int size) {
             IntByReference n = new IntByReference();
-            return K.K32.ReadProcessMemory(h, new Pointer(addr), mem, size, n) ? n.getValue() : 0;
+            if (K.K32.ReadProcessMemory(h, new Pointer(addr), mem, size, n)) return n.getValue();
+            // Falló (p. ej. el juego liberó una página después de VirtualQueryEx): se lee página por página
+            int done = 0;
+            while (done < size) {
+                int len = (int) Math.min(size - done, PAGE - ((addr + done) & (PAGE - 1)));
+                if (!K.K32.ReadProcessMemory(h, new Pointer(addr + done), mem.share(done), len, n) || n.getValue() != len) break;
+                done += len;
+            }
+            return done;
         }
 
         public byte[] read(long addr, int size) {
