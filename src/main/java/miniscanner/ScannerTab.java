@@ -17,6 +17,9 @@ final class ScannerTab extends JPanel {
     private final MiniScanner app;
     Scanner scanner;
     private long[] shownAddrs = new long[0];
+    /** Cuándo cambió por última vez el valor de cada fila (para pintarlo de rojo un momento). */
+    private long[] changedAt = new long[0];
+    private final JCheckBox autoBox = new JCheckBox("Auto-actualizar valores", true);
 
     private final JTextField valueField = new JTextField(10), value2Field = new JTextField(10), writeField = new JTextField(10);
     private final JLabel value2Label = new JLabel("y");
@@ -49,13 +52,46 @@ final class ScannerTab extends JPanel {
         north.add(row(firstBtn, nextBtn, undoBtn));
         JPanel south = new JPanel(new GridLayout(0, 1));
         south.add(row(new JLabel("Nuevo valor:"), writeField, button("Escribir en seleccionados", this::writeScanSelected),
-                button("Actualizar lista", this::showScanResults)));
+                button("Actualizar lista", this::showScanResults), autoBox));
         south.add(row(button("Agregar a la tabla", this::addScanToTable), button("Buscar pointers", this::scanToPointers),
                 button("Ver en memoria", () -> { int r = scanTable.getSelectedRow(); if (r >= 0) app.memoryTab.showAddress(shownAddrs[r]); })));
         add(north, BorderLayout.NORTH);
         add(new JScrollPane(scanTable), BorderLayout.CENTER);
         add(south, BorderLayout.SOUTH);
         updateScanUi();
+
+        scanTable.getColumnModel().getColumn(1).setCellRenderer(new javax.swing.table.DefaultTableCellRenderer() {
+            @Override public Component getTableCellRendererComponent(JTable t, Object v, boolean sel, boolean foc, int r, int c) {
+                Component comp = super.getTableCellRendererComponent(t, v, sel, foc, r, c);
+                boolean recent = r < changedAt.length && System.currentTimeMillis() - changedAt[r] < 1500;
+                comp.setForeground(recent ? Color.RED : sel ? t.getSelectionForeground() : t.getForeground());
+                return comp;
+            }
+        });
+        new Timer(500, e -> {
+            if (isShowing() && autoBox.isSelected() && !app.busy) refreshValues();
+        }).start();
+    }
+
+    /** Vuelve a leer el valor de las filas que se ven en pantalla (sin repetir el escaneo). */
+    private void refreshValues() {
+        Scanner s = scanner;
+        if (s == null || shownAddrs.length == 0) return;
+        Rectangle vr = scanTable.getVisibleRect();
+        int first = Math.max(0, scanTable.rowAtPoint(vr.getLocation()));
+        int last = scanTable.rowAtPoint(new Point(vr.x, vr.y + vr.height - 1));
+        if (last < 0) last = scanModel.getRowCount() - 1;
+        long now = System.currentTimeMillis();
+        boolean recent = false;
+        for (int r = first; r <= last && r < shownAddrs.length; r++) {
+            String v = readVal(shownAddrs[r], s.type);
+            if (!v.equals(scanModel.getValueAt(r, 1))) {
+                scanModel.setValueAt(v, r, 1);
+                changedAt[r] = now;
+            }
+            recent |= now - changedAt[r] < 1500;
+        }
+        if (recent) scanTable.repaint(); // para que el rojo se apague solo
     }
 
     /** Se abrió otro proceso: el escaneo y la pausa eran del anterior. */
@@ -189,6 +225,7 @@ final class ScannerTab extends JPanel {
         if (app.busy) return;
         closeScanner();
         shownAddrs = new long[0];
+        changedAt = new long[0];
         scanModel.setRowCount(0);
         updateScanUi();
         if (app.proc != null) app.setStatus(" Listo para un nuevo escaneo.");
@@ -202,6 +239,7 @@ final class ScannerTab extends JPanel {
         if (scanner == null || !scanner.hasResults()) return;
         long total = scanner.count();
         shownAddrs = scanner.firstAddresses(MiniScanner.MAX_SHOWN);
+        changedAt = new long[shownAddrs.length];
         for (long a : shownAddrs) scanModel.addRow(new Object[]{app.addrText(a), readVal(a, scanner.type)});
         String extra = total > MiniScanner.MAX_SHOWN ? " (mostrando los primeros " + MiniScanner.MAX_SHOWN + ")" : "";
         String hint = scanner.isSnapshot() ? " Cambia el valor en el juego y usa Aumentó / Disminuyó / Cambió / Sin cambio." : "";
