@@ -46,9 +46,11 @@ final class ScannerTab extends JPanel {
         undoBtn.addActionListener(e -> undoScan());
         hexBox.addActionListener(e -> showScanResults());
         holdBtn.addActionListener(e -> toggleHold());
+        holdBtn.setToolTipText("Congela el juego entero para escanear valores que cambian todo el tiempo. Funciona con su tecla desde dentro del juego.");
+        updateHoldText();
         JPanel north = new JPanel(new GridLayout(0, 1));
         north.add(row(new JLabel("Modo:"), modeBox, new JLabel("Valor:"), valueField, value2Label, value2Field, hexBox));
-        north.add(row(new JLabel("Tipo:"), typeBox, pauseBox, holdBtn));
+        north.add(row(new JLabel("Tipo:"), typeBox, pauseBox, holdBtn, button("Tecla...", this::editPauseKey)));
         north.add(row(firstBtn, nextBtn, undoBtn));
         JPanel south = new JPanel(new GridLayout(0, 1));
         south.add(row(new JLabel("Nuevo valor:"), writeField, button("Escribir en seleccionados", this::writeScanSelected),
@@ -98,7 +100,7 @@ final class ScannerTab extends JPanel {
     void processChanged() {
         closeScanner();
         holdBtn.setSelected(false);
-        holdBtn.setText(HOLD_OFF);
+        updateHoldText();
         newScan();
     }
 
@@ -176,12 +178,45 @@ final class ScannerTab extends JPanel {
                 return;
             }
             proc.suspend();
-            holdBtn.setText(HOLD_ON);
             app.setStatus(" Juego pausado. Haz el escaneo y reanúdalo cuando quieras.");
         } else {
             if (proc != null) proc.resume();
-            holdBtn.setText(HOLD_OFF);
             app.setStatus(" Juego reanudado.");
+        }
+        updateHoldText();
+    }
+
+    /** La tecla de pausa: como pulsar el botón, pero sin diálogos (el usuario está dentro del juego). */
+    void holdHotkey() {
+        if (app.proc == null) { app.setStatus(" Tecla de pausa: primero abre el proceso del juego."); return; }
+        holdBtn.doClick();
+    }
+
+    private void updateHoldText() {
+        int c = app.pauseCombo();
+        holdBtn.setText((holdBtn.isSelected() ? HOLD_ON : HOLD_OFF) + (c == 0 ? "" : " (" + Hotkey.keyText(c >> 8, c & 0xFF) + ")"));
+    }
+
+    void editPauseKey() {
+        int c = app.pauseCombo();
+        int[] key = {c >> 8, c & 0xFF};
+        JPanel form = new JPanel(new GridLayout(0, 1, 4, 4));
+        form.add(new JLabel("Tecla para pausar y reanudar el juego desde dentro del juego:"));
+        form.add(keyCaptureField(key));
+        form.add(new JLabel("Pulsa la combinación (F1-F12, letras, números, numpad o Pausa Inter). Supr o Retroceso para quitarla."));
+        app.releaseHotkeys(); // para poder pulsar la tecla actual
+        try {
+            if (JOptionPane.showConfirmDialog(this, form, "Tecla de pausa", JOptionPane.OK_CANCEL_OPTION) != JOptionPane.OK_OPTION) return;
+            int nc = key[1] == 0 ? 0 : Hotkey.combo(key[0], key[1]);
+            if (nc != 0 && app.cheatTab.hotkeyCombos().contains(nc)) {
+                app.error(Hotkey.keyText(key[0], key[1]) + " ya la usa una entrada de la tabla de trucos. Elige otra.");
+                return;
+            }
+            app.setPauseCombo(nc);
+            updateHoldText();
+            app.setStatus(nc == 0 ? " Tecla de pausa quitada." : " Tecla de pausa: " + Hotkey.keyText(key[0], key[1]) + ".");
+        } finally {
+            app.updateHotkeys();
         }
     }
 

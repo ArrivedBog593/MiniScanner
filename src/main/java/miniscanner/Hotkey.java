@@ -12,6 +12,8 @@ import java.util.List;
  */
 record Hotkey(int mods, int vk, Action action, String value) {
     static final int MOD_ALT = 1, MOD_CONTROL = 2, MOD_SHIFT = 4;
+    /** La tecla Pausa (Pause/Break): mismo código en Java y en Windows. */
+    static final int VK_PAUSE = 0x13;
     private static final int VK_SHIFT = 16, VK_CONTROL = 17, VK_MENU = 18;
 
     /** Lo que hace la tecla, con el nombre que usa Cheat Engine en sus tablas. */
@@ -28,9 +30,10 @@ record Hotkey(int mods, int vk, Action action, String value) {
         }
     }
 
-    /** Teclas permitidas: letras, números, numpad y F1-F12, que tienen el mismo código en Java y en Windows. */
+    /** Teclas permitidas: letras, números, numpad, F1-F12 y Pausa, que tienen el mismo código en Java y en Windows. */
     static boolean supported(int vk) {
-        return vk >= 'A' && vk <= 'Z' || vk >= '0' && vk <= '9' || vk >= 0x60 && vk <= 0x69 || vk >= 0x70 && vk <= 0x7B;
+        return vk >= 'A' && vk <= 'Z' || vk >= '0' && vk <= '9' || vk >= 0x60 && vk <= 0x69 || vk >= 0x70 && vk <= 0x7B
+                || vk == VK_PAUSE;
     }
 
     static int modsOf(KeyEvent e) {
@@ -53,6 +56,7 @@ record Hotkey(int mods, int vk, Action action, String value) {
         if ((mods & MOD_SHIFT) != 0) sb.append("Shift+");
         if (vk >= 0x70 && vk <= 0x7B) sb.append('F').append(vk - 0x6F);
         else if (vk >= 0x60 && vk <= 0x69) sb.append("Num ").append(vk - 0x60);
+        else if (vk == VK_PAUSE) sb.append("Pausa Inter"); // así se llama en los teclados en español (Pause/Break)
         else sb.append((char) vk);
         return sb.toString();
     }

@@ -2,13 +2,9 @@ package miniscanner;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
-import javax.swing.event.AncestorEvent;
-import javax.swing.event.AncestorListener;
 import javax.swing.table.AbstractTableModel;
 import javax.swing.table.DefaultTableCellRenderer;
 import java.awt.*;
-import java.awt.event.KeyAdapter;
-import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.File;
@@ -39,7 +35,6 @@ final class CheatTab extends JPanel {
 
     private final CheatTableModel model = new CheatTableModel();
     private final JTable table = new JTable(model);
-    private final Win.Hotkeys hotkeys = new Win.Hotkeys(this::hotkeyPressed, this::hotkeysFailed);
 
     CheatTab(MiniScanner app) {
         super(new BorderLayout());
@@ -103,7 +98,7 @@ final class CheatTab extends JPanel {
     /** Las entradas cambiaron (se agregaron, quitaron, movieron o cambiaron sus teclas). */
     private void changed() {
         rebuild();
-        updateHotkeys();
+        app.updateHotkeys();
     }
 
     /** Vuelve a armar las filas visibles a partir de los grupos. */
@@ -128,10 +123,11 @@ final class CheatTab extends JPanel {
         if (!rows.isEmpty()) model.fireTableRowsUpdated(0, rows.size() - 1);
     }
 
-    private void updateHotkeys() {
+    /** Las combinaciones de teclas que usan las entradas (la ventana las registra junto con la de pausa). */
+    Set<Integer> hotkeyCombos() {
         Set<Integer> combos = new HashSet<>();
         for (CheatEntry e : cheats) if (e.hotkey != null) combos.add(e.hotkey.combo());
-        hotkeys.set(combos);
+        return combos;
     }
 
     /** Descongela las direcciones absolutas (eran del proceso anterior). Devuelve cuántas. */
@@ -243,7 +239,8 @@ final class CheatTab extends JPanel {
     }
 
     // ------------------------------------------------------------ teclas rápidas
-    private void hotkeyPressed(int combo) {
+    /** Se pulsó una tecla rápida: aplica la acción de cada entrada que la usa. */
+    void hotkeyPressed(int combo) {
         List<String> done = new ArrayList<>();
         for (CheatEntry e : cheats) {
             Hotkey hk = e.hotkey;
@@ -257,38 +254,13 @@ final class CheatTab extends JPanel {
         app.setStatus(" " + Hotkey.keyText(combo >> 8, combo & 0xFF) + ": " + String.join(", ", done));
     }
 
-    private void hotkeysFailed(Set<Integer> combos) {
-        List<String> names = new ArrayList<>();
-        for (int c : combos) names.add(Hotkey.keyText(c >> 8, c & 0xFF));
-        app.setStatus(" No se pudo usar " + String.join(", ", names) + ": otro programa ya usa esa tecla. Elige otra.");
-    }
-
     void editHotkey() {
         List<CheatEntry> sel = selectedEntries();
         if (sel.isEmpty()) { app.info("Selecciona una o más entradas (o un grupo) de la tabla."); return; }
         Hotkey cur = sel.get(0).hotkey;
 
         int[] key = cur == null ? new int[]{0, 0} : new int[]{cur.mods(), cur.vk()}; // {mods, vk}; vk 0 = ninguna
-        JTextField keyField = new JTextField(cur == null ? "" : cur.keyText(), 14);
-        keyField.setEditable(false);
-        keyField.addKeyListener(new KeyAdapter() {
-            @Override public void keyPressed(KeyEvent ev) {
-                int vk = ev.getKeyCode();
-                if (vk == KeyEvent.VK_DELETE || vk == KeyEvent.VK_BACK_SPACE) { key[0] = key[1] = 0; keyField.setText(""); }
-                else if (Hotkey.supported(vk)) {
-                    key[0] = Hotkey.modsOf(ev);
-                    key[1] = vk;
-                    keyField.setText(Hotkey.keyText(key[0], vk));
-                }
-                ev.consume();
-            }
-        });
-        // Que el campo tenga el foco al abrir el diálogo, para pulsar la tecla directamente
-        keyField.addAncestorListener(new AncestorListener() {
-            public void ancestorAdded(AncestorEvent ev) { keyField.requestFocusInWindow(); }
-            public void ancestorRemoved(AncestorEvent ev) {}
-            public void ancestorMoved(AncestorEvent ev) {}
-        });
+        JTextField keyField = keyCaptureField(key);
         JRadioButton toggle = new JRadioButton("Congelar / descongelar", cur == null || cur.action() == Hotkey.Action.TOGGLE);
         JRadioButton set = new JRadioButton("Poner el valor:", !toggle.isSelected());
         ButtonGroup group = new ButtonGroup();
@@ -297,18 +269,22 @@ final class CheatTab extends JPanel {
         JTextField valueField = new JTextField(cur != null && cur.value() != null ? cur.value() : "", 10);
 
         JPanel form = new JPanel(new GridLayout(0, 1, 4, 4));
-        form.add(new JLabel("Pulsa la combinación (F1-F12, letras, números o numpad, con Ctrl/Alt/Shift)."));
+        form.add(new JLabel("Pulsa la combinación (F1-F12, letras, números, numpad o Pausa Inter, con Ctrl/Alt/Shift)."));
         form.add(new JLabel("Supr o Retroceso para quitarla."));
         form.add(keyField);
         form.add(toggle);
         form.add(row(set, valueField));
 
         // Mientras el diálogo está abierto se sueltan las teclas, para poder volver a elegir una que ya se usa
-        hotkeys.set(Set.of());
+        app.releaseHotkeys();
         int answer = JOptionPane.showConfirmDialog(this, form, "Tecla rápida (" + sel.size() + " entrada(s))", JOptionPane.OK_CANCEL_OPTION);
         try {
             if (answer != JOptionPane.OK_OPTION) return;
             Hotkey hk = null;
+            if (key[1] != 0 && Hotkey.combo(key[0], key[1]) == app.pauseCombo()) {
+                app.error(Hotkey.keyText(key[0], key[1]) + " es la tecla para pausar el juego. Elige otra (o cambia la de pausa en el Escáner).");
+                return;
+            }
             if (key[1] != 0) {
                 String value = valueField.getText().trim();
                 if (set.isSelected())
@@ -322,7 +298,7 @@ final class CheatTab extends JPanel {
             refreshRows();
             app.setStatus(hk == null ? " Tecla rápida quitada." : " Tecla rápida: " + hk + ". No olvides guardar la tabla.");
         } finally {
-            updateHotkeys();
+            app.updateHotkeys();
         }
     }
 

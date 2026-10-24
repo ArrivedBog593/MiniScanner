@@ -4,7 +4,9 @@ import javax.swing.*;
 import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.*;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.function.Consumer;
 import java.util.prefs.Preferences;
@@ -38,6 +40,9 @@ public class MiniScanner extends JFrame {
     private final JProgressBar progressBar = new JProgressBar(0, 100);
     private final JButton cancelBtn = new JButton("Cancelar");
     private final JPanel busyPanel = row(progressBar, cancelBtn);
+
+    /** Teclas rápidas globales: la de pausar el juego y las de la tabla de trucos. */
+    private final Win.Hotkeys hotkeys = new Win.Hotkeys(this::hotkeyPressed, this::hotkeysFailed);
 
     final ScannerTab scannerTab;
     final CheatTab cheatTab;
@@ -88,7 +93,38 @@ public class MiniScanner extends JFrame {
         add(bottom, BorderLayout.SOUTH);
 
         refreshProcs();
+        updateHotkeys();
         new Timer(1000, e -> watchProcess()).start();
+    }
+
+    // ================================================================ teclas rápidas
+    /** Tecla para pausar/reanudar el juego (Hotkey.combo), 0 = ninguna. Por defecto, la tecla Pausa. */
+    int pauseCombo() { return prefs.getInt("pauseHotkey", Hotkey.combo(0, Hotkey.VK_PAUSE)); }
+
+    void setPauseCombo(int combo) {
+        prefs.putInt("pauseHotkey", combo);
+        updateHotkeys();
+    }
+
+    /** Registra la tecla de pausa y las de la tabla de trucos. */
+    void updateHotkeys() {
+        Set<Integer> combos = new HashSet<>(cheatTab.hotkeyCombos());
+        if (pauseCombo() != 0) combos.add(pauseCombo());
+        hotkeys.set(combos);
+    }
+
+    /** Suelta todas las teclas (mientras un diálogo pide elegir una, para que se puedan pulsar). */
+    void releaseHotkeys() { hotkeys.set(Set.of()); }
+
+    private void hotkeyPressed(int combo) {
+        if (combo == pauseCombo()) scannerTab.holdHotkey();
+        cheatTab.hotkeyPressed(combo);
+    }
+
+    private void hotkeysFailed(Set<Integer> combos) {
+        List<String> names = new ArrayList<>();
+        for (int c : combos) names.add(Hotkey.keyText(c >> 8, c & 0xFF) + (c == pauseCombo() ? " (pausar juego)" : ""));
+        status.setText(" No se pudo usar " + String.join(", ", names) + ": otro programa ya usa esa tecla. Elige otra.");
     }
 
     // ================================================================ helpers para las pestañas

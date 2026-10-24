@@ -15,6 +15,8 @@ class HotkeyTest {
         assertEquals("F12", Hotkey.keyText(0, 0x7B));
         assertEquals("Ctrl+Alt+Shift+K", Hotkey.keyText(Hotkey.MOD_CONTROL | Hotkey.MOD_ALT | Hotkey.MOD_SHIFT, 'K'));
         assertEquals("Num 5", Hotkey.keyText(0, 0x65));
+        assertEquals("Pausa Inter", Hotkey.keyText(0, Hotkey.VK_PAUSE));
+        assertTrue(Hotkey.supported(Hotkey.VK_PAUSE));
         assertEquals("F1 → congelar", new Hotkey(0, F1, Hotkey.Action.TOGGLE, null).toString());
         assertEquals("Ctrl+2 → 999", new Hotkey(Hotkey.MOD_CONTROL, '2', Hotkey.Action.SET, "999").toString());
     }
