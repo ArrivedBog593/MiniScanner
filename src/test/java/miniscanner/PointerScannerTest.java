@@ -75,6 +75,14 @@ class PointerScannerTest {
     }
 
     @Test
+    void sePuedeCancelar() {
+        long[] vals = {0x4FF0}, addrs = {0x3000};
+        Progress cancel = (done, total) -> { throw new Progress.Cancelled(); };
+        assertThrows(Progress.Cancelled.class,
+                () -> PointerScanner.findChains(vals, addrs, 1, 0x5000, 3, 0x1000, MODULE_AT, cancel));
+    }
+
+    @Test
     void limiteDeMemoriaEsRazonable() {
         long limit = PointerScanner.pointerLimit();
         assertTrue(limit > 0 && limit <= PointerScanner.MAX_ARRAY);

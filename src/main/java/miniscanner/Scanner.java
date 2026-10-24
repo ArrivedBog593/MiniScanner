@@ -169,6 +169,7 @@ final class Scanner implements Closeable {
             long base = regs.get(r).base(), size = regs.get(r).size();
             for (long off = 0; off < size; off += CHUNK) {
                 if (res.n > SPARSE_LIMIT) return null;
+                p.update(r, regs.size()); // también es donde se nota si se canceló, en regiones enormes
                 int got = proc.readInto(base + off, mem, (int) Math.min(CHUNK + OVERLAP, size - off));
                 if (got < sz) continue;
                 ByteBuffer b = mem.getByteBuffer(0, got).order(Win.LE);

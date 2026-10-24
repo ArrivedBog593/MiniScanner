@@ -94,5 +94,3 @@ enum ValueType {
 
     @Override public String toString() { return label; }
 }
-
-interface Progress { void update(long done, long total); }

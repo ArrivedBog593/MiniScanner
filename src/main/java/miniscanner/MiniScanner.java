@@ -25,6 +25,7 @@ public class MiniScanner extends JFrame {
     volatile boolean busy;
     volatile long progDone, progTotal;
     volatile String phase = "";
+    private volatile boolean cancelRequested;
 
     /** Nombre del juego que se cerró y al que hay que reconectarse cuando vuelva a abrirse (null = ninguno). */
     private String waitingFor;
@@ -34,6 +35,9 @@ public class MiniScanner extends JFrame {
     private final JCheckBox reconnectBox = new JCheckBox("Reconectar solo", prefs.getBoolean("reconnect", true));
     private final JLabel status = new JLabel(" Elige el proceso del juego y presiona Abrir.");
     private final JTabbedPane tabs = new JTabbedPane();
+    private final JProgressBar progressBar = new JProgressBar(0, 100);
+    private final JButton cancelBtn = new JButton("Cancelar");
+    private final JPanel busyPanel = row(progressBar, cancelBtn);
 
     final ScannerTab scannerTab;
     final CheatTab cheatTab;
@@ -66,9 +70,19 @@ public class MiniScanner extends JFrame {
         tabs.addTab("Memoria", memoryTab);
 
         status.setBorder(BorderFactory.createEmptyBorder(3, 6, 3, 6));
+        progressBar.setStringPainted(true);
+        cancelBtn.addActionListener(e -> {
+            cancelRequested = true;
+            cancelBtn.setEnabled(false);
+            cancelBtn.setText("Cancelando...");
+        });
+        busyPanel.setVisible(false);
+        JPanel bottom = new JPanel(new BorderLayout());
+        bottom.add(status, BorderLayout.CENTER);
+        bottom.add(busyPanel, BorderLayout.EAST);
         add(top, BorderLayout.NORTH);
         add(tabs, BorderLayout.CENTER);
-        add(status, BorderLayout.SOUTH);
+        add(bottom, BorderLayout.SOUTH);
 
         refreshProcs();
         new Timer(1000, e -> watchProcess()).start();
@@ -109,21 +123,36 @@ public class MiniScanner extends JFrame {
         return fc;
     }
 
-    /** Ejecuta una tarea larga en segundo plano mostrando el progreso. */
+    /**
+     * Ejecuta una tarea larga en segundo plano con barra de progreso y botón Cancelar.
+     * La tarea debe pasar {@link #setProg} como su {@link Progress}: es por donde se entera de que la cancelaron.
+     */
     <T> void runBg(String label, Callable<T> task, Consumer<T> onDone) {
         busy = true;
+        cancelRequested = false;
         progDone = 0; progTotal = 0; phase = label;
-        Timer timer = new Timer(150, e -> status.setText(" " + phase + "... "
-                + (progTotal > 0 ? (progDone * 100 / Math.max(1, progTotal)) + "%" : "")));
+        cancelBtn.setEnabled(true);
+        cancelBtn.setText("Cancelar");
+        progressBar.setValue(0);
+        progressBar.setIndeterminate(true);
+        busyPanel.setVisible(true);
+        Timer timer = new Timer(150, e -> {
+            status.setText(" " + phase + "...");
+            long total = progTotal;
+            progressBar.setIndeterminate(total <= 0);
+            if (total > 0) progressBar.setValue((int) (progDone * 100 / total));
+        });
         timer.start();
         new SwingWorker<T, Void>() {
             @Override protected T doInBackground() throws Exception { return task.call(); }
             @Override protected void done() {
                 timer.stop();
+                busyPanel.setVisible(false);
                 busy = false;
                 try { onDone.accept(get()); }
                 catch (Exception ex) {
                     Throwable c = ex.getCause() != null ? ex.getCause() : ex;
+                    if (c instanceof Progress.Cancelled) { status.setText(" Cancelado. Los resultados anteriores siguen como estaban."); return; }
                     status.setText(" Error.");
                     error(c.getMessage() != null ? c.getMessage() : c.toString());
                 }
@@ -131,7 +160,11 @@ public class MiniScanner extends JFrame {
         }.execute();
     }
 
-    void setProg(long done, long total) { progDone = done; progTotal = total; }
+    /** El {@link Progress} de las tareas de runBg; lanza Progress.Cancelled si se pulsó Cancelar. */
+    void setProg(long done, long total) {
+        if (cancelRequested) throw new Progress.Cancelled();
+        progDone = done; progTotal = total;
+    }
 
     // ================================================================ proceso
     void refreshProcs() {

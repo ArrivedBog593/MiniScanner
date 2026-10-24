@@ -69,6 +69,7 @@ final class PointerScanner {
                 for (long off = 0; off < r.size(); off += CHUNK) {
                     // Si ya no caben (lo detectó este hilo u otro), se para todo antes de quedarse sin RAM
                     if (found.get() > limit) throw new IllegalStateException(tooMany(limit));
+                    p.update(done.get(), regs.size()); // permite cancelar sin esperar al final de la región
                     int got = proc.readInto(r.base() + off, mem, (int) Math.min(CHUNK, r.size() - off));
                     if (got <= 0) continue;
                     ByteBuffer b = mem.getByteBuffer(0, got).order(Win.LE);

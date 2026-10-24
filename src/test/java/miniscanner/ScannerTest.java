@@ -10,6 +10,34 @@ class ScannerTest {
 
     static long rel(Scanner s) { return s.firstAddresses(1)[0] - BASE; }
 
+    /** Como el Progress de la ventana después de pulsar Cancelar. */
+    static final Progress CANCEL = (done, total) -> { throw new Progress.Cancelled(); };
+
+    @Test
+    void cancelarElPrimerEscaneoNoDejaResultados() {
+        FakeMemory m = new FakeMemory(BASE, 64 * 1024);
+        for (Scanner.Mode mode : new Scanner.Mode[]{Scanner.Mode.EXACT, Scanner.Mode.UNKNOWN})
+            try (Scanner s = new Scanner(m, ValueType.INT4)) {
+                assertThrows(Progress.Cancelled.class, () -> s.firstScan(mode, 0, 0, CANCEL));
+                assertFalse(s.hasResults(), mode.name());
+            }
+    }
+
+    @Test
+    void cancelarUnSiguienteEscaneoConservaLosResultados() throws Exception {
+        FakeMemory m = new FakeMemory(BASE, 64 * 1024);
+        m.mem.setInt(0x40, 50);
+        m.mem.setInt(0x80, 50);
+        try (Scanner s = new Scanner(m, ValueType.INT4)) {
+            s.firstScan(Scanner.Mode.EXACT, 50, 0, NONE);
+            m.mem.setInt(0x40, 60);
+            assertThrows(Progress.Cancelled.class, () -> s.nextScan(Scanner.Mode.CHANGED, 0, 0, CANCEL));
+            assertEquals(2, s.count());
+            s.nextScan(Scanner.Mode.CHANGED, 0, 0, NONE);
+            assertEquals(1, s.count());
+        }
+    }
+
     @Test
     void exactoEncuentraTodasLasCoincidencias() throws Exception {
         FakeMemory m = new FakeMemory(BASE, 64 * 1024);
