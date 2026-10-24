@@ -1,0 +1,25 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+repositories { mavenCentral() }
+
+dependencies {
+    implementation 'net.java.dev.jna:jna-platform:5.14.0'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+    options.encoding = 'UTF-8'
+}
+
+application { mainClass = 'miniscanner.MiniScanner' }
+
+// .jar "gordo": incluye JNA para que funcione con doble clic
+jar {
+    manifest { attributes 'Main-Class': 'miniscanner.MiniScanner' }
+    from { configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) } }
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}

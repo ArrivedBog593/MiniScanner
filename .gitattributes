@@ -1,0 +1,4 @@
+# gradlew es un script de shell: con CRLF no funciona en Linux/WSL
+gradlew text eol=lf
+*.bat text eol=crlf
+*.jar binary
