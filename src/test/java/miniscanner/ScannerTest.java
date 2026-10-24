@@ -58,7 +58,7 @@ class ScannerTest {
         m.mem.setFloat(0x10, 1.52f);
         m.mem.setFloat(0x20, 1.56f);
         try (Scanner s = new Scanner(m, ValueType.FLOAT)) {
-            s.tol = MiniScanner.tolFor("1.5"); // ±0.05
+            s.tol = ValueType.tolFor("1.5"); // ±0.05
             s.firstScan(Scanner.Mode.EXACT, 1.5, 0, NONE);
             assertEquals(1, s.count());
             assertEquals(0x10, rel(s));

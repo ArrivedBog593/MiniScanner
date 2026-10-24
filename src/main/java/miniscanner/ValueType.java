@@ -78,6 +78,14 @@ enum ValueType {
     /** Siempre con punto decimal, sin importar el idioma de Windows, para que parse() lo lea igual. */
     String format(double v) { return isFloat ? String.format(Locale.ROOT, "%.2f", v) : String.valueOf((long) v); }
 
+    /** Tolerancia de floats según los decimales escritos: "100" → ±0.5, "1.5" → ±0.05 (como Cheat Engine). */
+    static double tolFor(String s) {
+        s = s.trim();
+        int dot = Math.max(s.lastIndexOf('.'), s.lastIndexOf(','));
+        int decimals = dot < 0 ? 0 : s.length() - dot - 1;
+        return 0.5 * Math.pow(10, -decimals);
+    }
+
     static ValueType fromCt(String s) {
         if (s == null) return null;
         for (ValueType t : values()) if (t.ctName.equalsIgnoreCase(s.trim())) return t;

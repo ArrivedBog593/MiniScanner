@@ -63,8 +63,8 @@ class ValueTypeTest {
 
     @Test
     void toleranciaSegunDecimales() {
-        assertEquals(0.5, MiniScanner.tolFor("100"), 1e-12);
-        assertEquals(0.05, MiniScanner.tolFor("1.5"), 1e-12);
-        assertEquals(0.005, MiniScanner.tolFor("1,25"), 1e-12);
+        assertEquals(0.5, ValueType.tolFor("100"), 1e-12);
+        assertEquals(0.05, ValueType.tolFor("1.5"), 1e-12);
+        assertEquals(0.005, ValueType.tolFor("1,25"), 1e-12);
     }
 }
