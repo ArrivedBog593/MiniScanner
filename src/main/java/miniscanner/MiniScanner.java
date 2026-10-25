@@ -136,6 +136,7 @@ public class MiniScanner extends JFrame {
 
     void info(String msg) { JOptionPane.showMessageDialog(this, msg); }
 
+    @SuppressWarnings("BooleanMethodIsAlwaysInverted") // se usa como if (!needProc()) return;
     boolean needProc() {
         if (proc == null) { error("Primero elige el proceso del juego y presiona Abrir."); return false; }
         if (busy) { info("Espera a que termine la operación actual."); return false; }

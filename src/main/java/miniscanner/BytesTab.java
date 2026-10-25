@@ -66,7 +66,7 @@ final class BytesTab extends JPanel {
 
     void search() {
         if (!app.needProc()) return;
-        Kind kind = (Kind) kindBox.getSelectedItem();
+        Kind kind = selected(kindBox);
         ByteSearch.Pattern pat;
         try {
             pat = kind == Kind.AOB ? ByteSearch.parseAob(queryField.getText())
@@ -95,13 +95,13 @@ final class BytesTab extends JPanel {
         app.setStatus(String.format(" %,d resultados%s.", results.size(), extra));
     }
 
-    private long selected() {
+    private long selectedAddress() {
         int r = table.getSelectedRow();
         return r < 0 ? Win.BAD : results.get(r);
     }
 
     void showSelected() {
-        long a = selected();
+        long a = selectedAddress();
         if (a == Win.BAD) { app.info("Selecciona un resultado."); return; }
         app.memoryTab.showAddress(a);
     }
@@ -112,7 +112,7 @@ final class BytesTab extends JPanel {
         String name = JOptionPane.showInputDialog(this, "Nombre para la(s) entrada(s):", queryField.getText().trim());
         if (name == null) return;
         List<CheatEntry> added = new ArrayList<>();
-        for (int r : rows) added.add(new CheatEntry(name, AddressExpr.of(app.proc, results.get(r)), (ValueType) typeBox.getSelectedItem()));
+        for (int r : rows) added.add(new CheatEntry(name, AddressExpr.of(app.proc, results.get(r)), selected(typeBox)));
         app.cheatTab.addAll(added);
         app.setStatus(" Agregado a la tabla de trucos.");
     }

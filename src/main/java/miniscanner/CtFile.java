@@ -26,6 +26,9 @@ final class CtFile {
 
     record LoadResult(List<CheatEntry> entries, int skipped) {}
 
+    // Las "http://" de este archivo no son enlaces: son los nombres oficiales de opciones del parser XML.
+    // Nunca se descargan, y con "https://" el parser no las reconocería (se perdería la protección contra XXE).
+    @SuppressWarnings("HttpUrlsUsage")
     static LoadResult load(File file) throws Exception {
         DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
         f.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
@@ -96,6 +99,7 @@ final class CtFile {
         return null;
     }
 
+    @SuppressWarnings("HttpUrlsUsage") // "{http://xml.apache.org/xslt}indent-amount" es un nombre de opción, ver load()
     static void save(File file, List<CheatEntry> entries) throws Exception {
         DocumentBuilder b = DocumentBuilderFactory.newInstance().newDocumentBuilder();
         Document doc = b.newDocument();

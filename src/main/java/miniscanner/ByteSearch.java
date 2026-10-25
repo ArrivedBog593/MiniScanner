@@ -33,6 +33,7 @@ final class ByteSearch {
         }
     }
 
+    @SuppressWarnings("BooleanMethodIsAlwaysInverted") // se usa como !same(...): "este byte no coincide"
     static boolean same(byte a, byte b, boolean ignoreCase) { return a == b || ignoreCase && fold(a) == fold(b); }
 
     /** Mayúsculas ASCII a minúsculas (sirve también para UTF-16, cuyo byte alto es 0). */
@@ -111,7 +112,7 @@ final class ByteSearch {
 
     static String hex(byte[] b) {
         StringBuilder sb = new StringBuilder();
-        for (byte x : b) { if (sb.length() > 0) sb.append(' '); sb.append(String.format("%02X", x & 0xFF)); }
+        for (byte x : b) { if (!sb.isEmpty()) sb.append(' '); sb.append(String.format("%02X", x & 0xFF)); }
         return sb.toString();
     }
 

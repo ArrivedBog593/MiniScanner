@@ -12,6 +12,7 @@ import java.util.regex.Pattern;
  *  - "Juego.exe"+1A2B con offsets → pointer: se lee la dirección base, se suma el offset, se vuelve a leer...
  *  - 7FF6A1B2C3D0                → dirección absoluta (solo vale mientras el juego siga abierto)
  */
+@SuppressWarnings("ClassCanBeRecord")
 final class AddressExpr {
     final String module;      // null = dirección absoluta
     final long offset;
@@ -49,7 +50,7 @@ final class AddressExpr {
 
     String offsetsText() {
         StringBuilder sb = new StringBuilder();
-        for (long o : offsets) { if (sb.length() > 0) sb.append(", "); sb.append(hex(o)); }
+        for (long o : offsets) { if (!sb.isEmpty()) sb.append(", "); sb.append(hex(o)); }
         return sb.toString();
     }
 
@@ -96,7 +97,7 @@ final class AddressExpr {
         return out.stream().mapToLong(Long::longValue).toArray();
     }
 
-    /** Formato de una línea para guardar listas de pointers: modulo|offset|off1,off2,... */
+    /** Formato de una línea para guardar listas de pointers: módulo|offset|off1,off2,... */
     String serialize() {
         StringBuilder sb = new StringBuilder(module == null ? "" : module).append('|').append(hex(offset)).append('|');
         for (int i = 0; i < offsets.length; i++) { if (i > 0) sb.append(','); sb.append(hex(offsets[i])); }

@@ -25,16 +25,7 @@ final class PointerTab extends JPanel {
         super(new BorderLayout());
         this.app = app;
         ptrType.setSelectedItem(ValueType.INT4);
-        JTextArea help = new JTextArea("""
-                Cómo encontrar una dirección permanente:
-                 1) Encuentra el valor con el Escáner y pulsa «Buscar pointers de esta dirección».
-                 2) Pulsa «Escanear pointers» (puede tardar y usar bastante RAM).
-                 3) Cierra y vuelve a abrir el juego, ábrelo aquí otra vez y encuentra de nuevo la dirección con el Escáner.
-                 4) Pon la nueva dirección arriba y pulsa «Filtrar por dirección». Repite 3-4 hasta que queden pocos.
-                 5) Agrega uno a la tabla de trucos. ¡Ya funcionará cada vez que abras el juego!""");
-        help.setEditable(false);
-        help.setOpaque(false);
-        help.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
+        JTextArea help = createHelp();
         JPanel north = new JPanel(new GridLayout(0, 1));
         north.add(row(new JLabel("Dirección objetivo (hex):"), ptrTarget, new JLabel("Tipo:"), ptrType,
                 new JLabel("Nivel máx:"), ptrLevel, new JLabel("Offset máx (hex):"), ptrMaxOffset));
@@ -49,6 +40,20 @@ final class PointerTab extends JPanel {
         add(top, BorderLayout.NORTH);
         add(new JScrollPane(ptrTable), BorderLayout.CENTER);
         add(south, BorderLayout.SOUTH);
+    }
+
+    private static JTextArea createHelp() {
+        JTextArea help = new JTextArea("""
+                Cómo encontrar una dirección permanente:
+                 1) Encuentra el valor con el Escáner y pulsa «Buscar pointers de esta dirección».
+                 2) Pulsa «Escanear pointers» (puede tardar y usar bastante RAM).
+                 3) Cierra y vuelve a abrir el juego, ábrelo aquí otra vez y encuentra de nuevo la dirección con el Escáner.
+                 4) Pon la nueva dirección arriba y pulsa «Filtrar por dirección». Repite 3-4 hasta que queden pocos.
+                 5) Agrega uno a la tabla de trucos. ¡Ya funcionará cada vez que abras el juego!""");
+        help.setEditable(false);
+        help.setOpaque(false);
+        help.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
+        return help;
     }
 
     /** Pone la dirección (desde el Escáner o la tabla de trucos) y muestra esta pestaña. */
@@ -92,7 +97,7 @@ final class PointerTab extends JPanel {
 
     void filterPtrByValue() {
         if (!app.needProc() || pointers.isEmpty()) return;
-        ValueType t = (ValueType) ptrType.getSelectedItem();
+        ValueType t = selected(ptrType);
         double v;
         try { v = t.parse(ptrValue.getText()); } catch (NumberFormatException ex) { app.error("Valor inválido."); return; }
         double tol = ValueType.tolFor(ptrValue.getText());
@@ -103,7 +108,7 @@ final class PointerTab extends JPanel {
 
     void showPointers() {
         ptrModel.setRowCount(0);
-        ValueType t = (ValueType) ptrType.getSelectedItem();
+        ValueType t = selected(ptrType);
         int count = Math.min(pointers.size(), MiniScanner.MAX_SHOWN);
         for (int i = 0; i < count; i++) {
             AddressExpr e = pointers.get(i);
@@ -120,7 +125,7 @@ final class PointerTab extends JPanel {
         String name = JOptionPane.showInputDialog(this, "Nombre para la(s) entrada(s):", "Dinero");
         if (name == null) return;
         List<CheatEntry> added = new ArrayList<>();
-        for (int r : rows) added.add(new CheatEntry(name, pointers.get(r), (ValueType) ptrType.getSelectedItem()));
+        for (int r : rows) added.add(new CheatEntry(name, pointers.get(r), selected(ptrType)));
         app.cheatTab.addAll(added);
         app.setStatus(" Agregado a la tabla de trucos. No olvides guardar la tabla.");
     }

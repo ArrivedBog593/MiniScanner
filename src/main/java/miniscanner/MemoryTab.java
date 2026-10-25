@@ -172,7 +172,7 @@ final class MemoryTab extends JPanel {
         if (a == Win.BAD || app.proc == null) { app.info("Selecciona un byte en la tabla."); return; }
         String name = JOptionPane.showInputDialog(this, "Nombre para la entrada:", "Sin nombre");
         if (name == null) return;
-        app.cheatTab.addAll(List.of(new CheatEntry(name, AddressExpr.of(app.proc, a), (ValueType) memType.getSelectedItem())));
+        app.cheatTab.addAll(List.of(new CheatEntry(name, AddressExpr.of(app.proc, a), selected(memType))));
         app.setStatus(" Agregado a la tabla de trucos.");
     }
 }

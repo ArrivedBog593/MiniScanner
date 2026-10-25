@@ -163,9 +163,9 @@ final class ScannerTab extends JPanel {
     // ------------------------------------------------------------ pausa
     static <T> T withPause(Win.Proc p, boolean pause, Callable<T> c) throws Exception {
         // Si el juego ya estaba pausado a mano, el escaneo no lo reanuda al terminar.
-        boolean alreadyPaused = p.suspended;
-        if (pause && !alreadyPaused) p.suspend();
-        try { return c.call(); } finally { if (pause && !alreadyPaused) p.resume(); }
+        // Si Windows no deja pausarlo, se escanea igual (sin pausa).
+        boolean pausedHere = pause && !p.suspended && p.suspend();
+        try { return c.call(); } finally { if (pausedHere) p.resume(); }
     }
 
     /** Botón de pausa manual: congela el juego hasta que se vuelva a pulsar. */
@@ -177,8 +177,11 @@ final class ScannerTab extends JPanel {
                 app.error("Primero elige el proceso del juego y presiona Abrir.");
                 return;
             }
-            proc.suspend();
-            app.setStatus(" Juego pausado. Haz el escaneo y reanúdalo cuando quieras.");
+            if (proc.suspend()) app.setStatus(" Juego pausado. Haz el escaneo y reanúdalo cuando quieras.");
+            else {
+                holdBtn.setSelected(false);
+                app.setStatus(" Windows no dejó pausar el juego (¿tiene anti-cheat o es un proceso protegido?).");
+            }
         } else {
             if (proc != null) proc.resume();
             app.setStatus(" Juego reanudado.");
@@ -221,10 +224,13 @@ final class ScannerTab extends JPanel {
     }
 
     // ------------------------------------------------------------ escaneos
+    // El Scanner no va en try-with-resources a propósito: tiene que seguir abierto con sus resultados para los
+    // siguientes escaneos. Se cierra en closeScanner() (nuevo escaneo o cambio de proceso), o él mismo si falla.
+    @SuppressWarnings("resource")
     void firstScan() {
         if (!app.needProc()) return;
-        ValueType type = (ValueType) typeBox.getSelectedItem();
-        Scanner.Mode m = (Scanner.Mode) modeBox.getSelectedItem();
+        ValueType type = selected(typeBox);
+        Scanner.Mode m = selected(modeBox);
         double[] v = readScanValues(type, m);
         if (v == null) return;
         Win.Proc p = app.proc;
@@ -238,7 +244,7 @@ final class ScannerTab extends JPanel {
 
     void nextScan() {
         if (scanner == null || !app.needProc()) return;
-        Scanner.Mode m = (Scanner.Mode) modeBox.getSelectedItem();
+        Scanner.Mode m = selected(modeBox);
         double[] v = readScanValues(scanner.type, m);
         if (v == null) return;
         if (m.values >= 1) scanner.tol = ValueType.tolFor(valueField.getText());

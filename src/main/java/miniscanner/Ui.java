@@ -7,6 +7,7 @@ import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
+import java.util.Objects;
 
 /** Pequeños atajos de Swing que usan todas las pestañas. */
 final class Ui {
@@ -22,6 +23,11 @@ final class Ui {
         return new DefaultTableModel(cols, 0) {
             @Override public boolean isCellEditable(int r, int c) { return false; }
         };
+    }
+
+    /** Lo elegido en un combo. Nunca es null: los combos de MiniScanner siempre tienen algo seleccionado. */
+    static <T> T selected(JComboBox<T> box) {
+        return Objects.requireNonNull(box.getItemAt(box.getSelectedIndex()), "combo sin selección");
     }
 
     static JPanel row(Component... cs) {

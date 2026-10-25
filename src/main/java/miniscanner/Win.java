@@ -37,7 +37,9 @@ final class Win {
     static final ByteOrder LE = ByteOrder.LITTLE_ENDIAN;
     static final long BAD = Long.MIN_VALUE;
     static final int PROCESS_ACCESS = 0x0010 | 0x0020 | 0x0008 | 0x0400 | 0x0800; // VM_READ|VM_WRITE|VM_OPERATION|QUERY_INFO|SUSPEND_RESUME
-    static final int MEM_COMMIT = 0x1000, MEM_IMAGE = 0x1000000, PAGE_NOACCESS = 0x01, PAGE_GUARD = 0x100;
+    static final int MEM_COMMIT = 0x1000, PAGE_NOACCESS = 0x01, PAGE_GUARD = 0x100;
+    /** Lo que devuelven las funciones de ntdll (NTSTATUS) cuando salen bien. */
+    static final int STATUS_SUCCESS = 0;
     static final int WRITABLE = 0x04 | 0x08 | 0x40 | 0x80;
     static final int PAGE = 0x1000;
     static final int STILL_ACTIVE = 259;
@@ -55,7 +57,8 @@ final class Win {
     /** Funciones de kernel32 que JNA no trae. */
     interface Kernel32Ex extends com.sun.jna.Library {
         boolean VirtualProtectEx(HANDLE h, Pointer addr, BaseTSD.SIZE_T size, int newProtect, IntByReference oldProtect);
-        boolean FlushInstructionCache(HANDLE h, Pointer addr, BaseTSD.SIZE_T size);
+        /** Devuelve un BOOL que no se usa: si falla, no hay nada que hacer (el byte ya está escrito). */
+        void FlushInstructionCache(HANDLE h, Pointer addr, BaseTSD.SIZE_T size);
     }
 
     private static final class K2 { static final Kernel32Ex K = Native.load("kernel32", Kernel32Ex.class); }
@@ -136,11 +139,17 @@ final class Win {
             }
         }
 
-        /** Pausa todo el juego (para escanear valores que cambian muy rápido). */
-        synchronized void suspend() {
+        /**
+         * Pausa todo el juego (para escanear valores que cambian muy rápido).
+         * Devuelve false si Windows no lo permitió (p. ej. un anti-cheat o un proceso protegido).
+         */
+        synchronized boolean suspend() {
             lock.readLock().lock();
             try {
-                if (!suspended && h != null) { NtHolder.NT.NtSuspendProcess(h); suspended = true; }
+                if (suspended) return true;
+                if (h == null || NtHolder.NT.NtSuspendProcess(h) != STATUS_SUCCESS) return false;
+                suspended = true;
+                return true;
             } finally {
                 lock.readLock().unlock();
             }
@@ -149,7 +158,10 @@ final class Win {
         synchronized void resume() {
             lock.readLock().lock(); // close() ya tiene el exclusivo y puede tomarlo igual
             try {
-                if (suspended && h != null) { NtHolder.NT.NtResumeProcess(h); suspended = false; }
+                // Aunque falle (el juego ya se cerró), deja de contar como pausado: no hay nada más que hacer
+                if (suspended && h != null && NtHolder.NT.NtResumeProcess(h) != STATUS_SUCCESS)
+                    System.err.println("MiniScanner: no se pudo reanudar " + info.name());
+                suspended = false;
             } finally {
                 lock.readLock().unlock();
             }
@@ -323,7 +335,7 @@ final class Win {
                     registered.clear();
                     Set<Integer> failed = new HashSet<>();
                     for (int c : want) {
-                        // El id es la propia combinación: (mods << 8 | vk) siempre cabe en el rango 0..0xBFFF
+                        // El ID es la propia combinación: (mods << 8 | vk) siempre cabe en el rango 0..0xBFFF
                         if (User32.INSTANCE.RegisterHotKey(null, c, (c >> 8) | MOD_NOREPEAT, c & 0xFF)) registered.add(c);
                         else failed.add(c);
                     }

@@ -15,6 +15,9 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import static miniscanner.Ui.*;
 
@@ -81,9 +84,13 @@ final class CheatTab extends JPanel {
         add(new JScrollPane(table), BorderLayout.CENTER);
         add(south, BorderLayout.SOUTH);
 
-        Thread freezer = new Thread(this::freezeLoop, "congelar");
-        freezer.setDaemon(true);
-        freezer.start();
+        // Congelar = volver a escribir el valor cada 100 ms, en un hilo propio para no trabar la ventana
+        ScheduledExecutorService freezer = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "congelar");
+            t.setDaemon(true);
+            return t;
+        });
+        freezer.scheduleWithFixedDelay(this::writeFrozen, 100, 100, TimeUnit.MILLISECONDS);
         // refresca los valores mientras la pestaña está a la vista
         new Timer(300, e -> {
             if (isShowing() && !table.isEditing()) refreshRows();
@@ -314,7 +321,7 @@ final class CheatTab extends JPanel {
         form.add(new JLabel("Tipo:")); form.add(type);
         if (JOptionPane.showConfirmDialog(this, form, "Agregar dirección", JOptionPane.OK_CANCEL_OPTION) != JOptionPane.OK_OPTION) return;
         try {
-            addAll(List.of(new CheatEntry(desc.getText().trim(), AddressExpr.parse(base.getText(), offs.getText()), (ValueType) type.getSelectedItem())));
+            addAll(List.of(new CheatEntry(desc.getText().trim(), AddressExpr.parse(base.getText(), offs.getText()), selected(type))));
         } catch (Exception ex) { app.error(ex.getMessage()); }
     }
 
@@ -396,16 +403,19 @@ final class CheatTab extends JPanel {
         } catch (Exception ex) { app.error("No se pudo guardar:\n" + ex.getMessage()); }
     }
 
-    void freezeLoop() {
-        while (true) {
-            Win.Proc p = app.proc;
-            if (p != null) for (CheatEntry e : cheats) {
-                byte[] v = e.frozenValue;
-                if (v == null) continue;
+    /** Vuelve a escribir los valores congelados (cada 100 ms). */
+    void writeFrozen() {
+        Win.Proc p = app.proc;
+        if (p == null) return;
+        for (CheatEntry e : cheats) {
+            byte[] v = e.frozenValue;
+            if (v == null) continue;
+            try {
                 long a = e.address.resolve(p);
                 if (a != Win.BAD) p.write(a, v);
+            } catch (RuntimeException ex) {
+                // Si una excepción saliera de aquí, el ScheduledExecutorService dejaría de congelar para siempre
             }
-            try { Thread.sleep(100); } catch (InterruptedException ex) { return; }
         }
     }
 }
