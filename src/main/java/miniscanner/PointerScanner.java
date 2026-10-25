@@ -115,7 +115,7 @@ final class PointerScanner {
         Runtime rt = Runtime.getRuntime();
         long free = rt.maxMemory() - (rt.totalMemory() - rt.freeMemory()) - RESERVE;
         long nodeLimit = Math.max(100_000, Math.min(free / 64, MAX_ARRAY / 4));
-        Result res = findChains(vals, addrs, n, target, maxLevel, maxOffset, proc::moduleAt, p, nodeLimit);
+        Result res = findChains(vals, addrs, n, target, maxLevel, maxOffset, proc::moduleAt, p, nodeLimit, MAX_RESULTS);
         p.update(1, 1);
         // Las cadenas más cortas primero: suelen ser las más estables
         res.chains().sort(Comparator.comparingInt((AddressExpr e) -> e.offsets.length).thenComparingLong(e -> e.offset));
@@ -125,7 +125,7 @@ final class PointerScanner {
     /**
      * Resultado de buscar cadenas. Los avisos dicen si se llegó a un tope: en ese caso la cadena buena puede faltar.
      * @param nodesCapped   no cupieron todos los pasos intermedios en la RAM
-     * @param resultsCapped había más de MAX_RESULTS cadenas y se guardaron las primeras (las más cortas)
+     * @param resultsCapped había más cadenas de las que caben y se guardaron las más cortas
      */
     record Result(List<AddressExpr> chains, boolean nodesCapped, boolean resultsCapped) {}
 
@@ -141,27 +141,34 @@ final class PointerScanner {
      *      nivel máximo. No basta con el primero que se encontró: si dos campos de una estructura apuntan cerca del
      *      objetivo, uno puede ser estable y el otro temporal, y hay que conservar los dos para filtrar después.</li>
      * </ol>
+     * Si hay más de maxResults cadenas se guardan las más cortas, que son las que más suelen sobrevivir: por eso la
+     * fase 2 va por largo (primero todas las de 1 offset, luego todas las de 2...) y no base por base.
      * @param nodeLimit cuántos nodos caben en la RAM
      */
     static Result findChains(long[] vals, long[] addrs, int total, long target, int maxLevel, long maxOffset,
-                             java.util.function.LongFunction<Win.Module> moduleAt, Progress p, long nodeLimit) {
+                             java.util.function.LongFunction<Win.Module> moduleAt, Progress p, long nodeLimit, int maxResults) {
         // Fase 1 en su propio método: sus estructuras temporales (como el conjunto de vistos) se liberan al volver
         Backward bw = backward(vals, addrs, total, target, maxLevel, maxOffset, moduleAt, p, nodeLimit);
         long[] na = bw.nodeAddr(), np = bw.nodePacked();
         LongList statAddr = bw.statAddr(), statTo = bw.statTo(), statOff = bw.statOff();
 
-        // ---- 2) hacia adelante
-        Forward f = new Forward(na, np, target, maxOffset, maxLevel, moduleAt);
-        for (int e = 0; e < statAddr.n && !f.capped; e++) {
-            long s = statAddr.a[e], to = statTo.a[e];
-            f.path[0] = statOff.a[e];
-            Win.Module m = moduleAt.apply(s);
-            if (to == target) f.emit(m, s, 1);
-            else {
-                int j = Arrays.binarySearch(na, to);
-                if (j >= 0) f.walk(m, s, j, maxLevel - 1, 1);
+        // ---- 2) hacia adelante, por largo
+        Forward f = new Forward(na, np, target, maxOffset, maxLevel, moduleAt, maxResults);
+        long steps = (long) maxLevel * Math.max(1, statAddr.n);
+        for (int len = 1; len <= maxLevel && !f.capped; len++) {
+            for (int e = 0; e < statAddr.n && !f.capped; e++) {
+                long s = statAddr.a[e], to = statTo.a[e];
+                f.path[0] = statOff.a[e];
+                Win.Module m = moduleAt.apply(s);
+                if (to == target) {
+                    if (len == 1) f.emit(m, s, 1);
+                } else if (len >= 2) {
+                    int j = Arrays.binarySearch(na, to);
+                    if (j >= 0 && (int) (np[j] >>> 56) <= len - 1) f.walk(m, s, j, len - 1, 1);
+                }
+                if ((e & 255) == 0)
+                    p.update(maxLevel * 1000L + ((len - 1L) * statAddr.n + e) * 1000L / steps, (maxLevel + 1) * 1000L);
             }
-            if ((e & 255) == 0) p.update(maxLevel * 1000L + e * 1000L / statAddr.n, (maxLevel + 1) * 1000L);
         }
         return new Result(f.results, bw.nodesCapped(), f.capped);
     }
@@ -217,35 +224,40 @@ final class PointerScanner {
         final java.util.function.LongFunction<Win.Module> moduleAt;
         final long[] path;
         final List<AddressExpr> results = new ArrayList<>();
+        final int maxResults;
         boolean capped;
 
-        Forward(long[] na, long[] np, long target, long maxOffset, int maxLevel, java.util.function.LongFunction<Win.Module> moduleAt) {
+        Forward(long[] na, long[] np, long target, long maxOffset, int maxLevel,
+                java.util.function.LongFunction<Win.Module> moduleAt, int maxResults) {
             this.na = na; this.np = np; this.target = target; this.maxOffset = maxOffset; this.moduleAt = moduleAt;
+            this.maxResults = maxResults;
             path = new long[maxLevel];
         }
 
         /**
-         * Sigue desde el nodo j, cuando ya hay len offsets en path y quedan budget por usar.
-         * Solo se entra en nodos que llegan al objetivo dentro del presupuesto, así que no hay caminos sin salida.
+         * Sigue desde el nodo j, cuando ya hay len offsets en path y faltan exactamente remaining (contando el
+         * último, el que llega al objetivo). Solo se entra en nodos que pueden llegar con lo que falta.
          */
-        void walk(Win.Module m, long base, int j, int budget, int len) {
+        void walk(Win.Module m, long base, int j, int remaining, int len) {
             if (capped) return;
             long v = np[j] & VAL_MASK;
-            if (target >= v && target - v <= maxOffset) {
-                path[len] = target - v;
-                emit(m, base, len + 1);
+            if (remaining == 1) {
+                if (target >= v && target - v <= maxOffset) {
+                    path[len] = target - v;
+                    emit(m, base, len + 1);
+                }
+                return;
             }
-            if (budget < 2) return;
             for (int c = lowerBound(na, na.length, v); c < na.length && na[c] - v <= maxOffset && !capped; c++) {
-                if ((int) (np[c] >>> 56) > budget - 1) continue;
+                if ((int) (np[c] >>> 56) > remaining - 1) continue;
                 path[len] = na[c] - v;
-                walk(m, base, c, budget - 1, len + 1);
+                walk(m, base, c, remaining - 1, len + 1);
             }
         }
 
         void emit(Win.Module m, long base, int len) {
             results.add(new AddressExpr(m.name(), base - m.base(), Arrays.copyOf(path, len)));
-            if (results.size() >= MAX_RESULTS) capped = true;
+            if (results.size() >= maxResults) capped = true;
         }
     }
 

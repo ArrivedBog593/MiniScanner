@@ -19,7 +19,7 @@ class PointerScannerTest {
         long[] vals = new long[pairs.length], addrs = new long[pairs.length];
         for (int i = 0; i < pairs.length; i++) { vals[i] = pairs[i][0]; addrs[i] = pairs[i][1]; }
         PointerScanner.sort(vals, addrs, 0, pairs.length - 1);
-        return PointerScanner.findChains(vals, addrs, pairs.length, target, maxLevel, maxOffset, MODULE_AT, NONE, Long.MAX_VALUE).chains();
+        return PointerScanner.findChains(vals, addrs, pairs.length, target, maxLevel, maxOffset, MODULE_AT, NONE, Long.MAX_VALUE, PointerScanner.MAX_RESULTS).chains();
     }
 
     static boolean has(List<AddressExpr> list, long baseOff, long... offsets) {
@@ -53,6 +53,27 @@ class PointerScannerTest {
         assertTrue(has(r, 0x100, 0x100, 0x10, 0x10), "camino por X+10: " + r);
         assertTrue(has(r, 0x100, 0x100, 0x18, 0x8), "camino por X+18: " + r);
         assertEquals(2, r.size());
+    }
+
+    @Test
+    void conTopeSeQuedanLasMasCortas() {
+        // C (en 0x50008) y B (en 0x30010) apuntan cerca del objetivo. C además está dentro de su propio rango,
+        // así que desde [game.exe+200] → C hay una cadena de 2 y otra de 3; desde [game.exe+100] → B, una de 2.
+        long target = 0x50000;
+        long[][] pairs = {
+                {target - 0x20, 0x50008},   // C
+                {target - 0x10, 0x30010},   // B
+                {0x50004, 0x400200},        // [game.exe+200] = C - 4
+                {0x30008, 0x400100}};       // [game.exe+100] = B - 8
+        long[] vals = new long[pairs.length], addrs = new long[pairs.length];
+        for (int i = 0; i < pairs.length; i++) { vals[i] = pairs[i][0]; addrs[i] = pairs[i][1]; }
+        PointerScanner.sort(vals, addrs, 0, pairs.length - 1);
+
+        assertEquals(4, PointerScanner.findChains(vals, addrs, 4, target, 3, 0x1000, MODULE_AT, NONE, Long.MAX_VALUE, 100).chains().size());
+        PointerScanner.Result r = PointerScanner.findChains(vals, addrs, 4, target, 3, 0x1000, MODULE_AT, NONE, Long.MAX_VALUE, 2);
+        assertTrue(r.resultsCapped());
+        assertTrue(has(r.chains(), 0x200, 0x4, 0x20), r.chains().toString());
+        assertTrue(has(r.chains(), 0x100, 0x8, 0x10), "la corta de la segunda base no debe quedar fuera: " + r.chains());
     }
 
     @Test
@@ -95,7 +116,7 @@ class PointerScannerTest {
         long[] vals = {0x4FF0}, addrs = {0x3000};
         Progress cancel = (done, total) -> { throw new Progress.Cancelled(); };
         assertThrows(Progress.Cancelled.class,
-                () -> PointerScanner.findChains(vals, addrs, 1, 0x5000, 3, 0x1000, MODULE_AT, cancel, Long.MAX_VALUE));
+                () -> PointerScanner.findChains(vals, addrs, 1, 0x5000, 3, 0x1000, MODULE_AT, cancel, Long.MAX_VALUE, PointerScanner.MAX_RESULTS));
     }
 
     @Test
