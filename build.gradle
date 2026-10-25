@@ -13,10 +13,15 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+// JNA carga código nativo para llamar a Windows. Desde Java 22 eso da un aviso, y en el futuro Java lo
+// bloqueará si no se permite explícitamente: se permite en los tests, en «gradlew run» y en el .jar.
+def nativeAccess = '--enable-native-access=ALL-UNNAMED'
+
 test {
     useJUnitPlatform()
     // Las pruebas del escáner simulan 16-32 MB de memoria del juego
     maxHeapSize = '1g'
+    jvmArgs nativeAccess
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -24,11 +29,16 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
-application { mainClass = 'miniscanner.MiniScanner' }
+application {
+    mainClass = 'miniscanner.MiniScanner'
+    applicationDefaultJvmArgs = [nativeAccess]
+}
 
 // .jar "gordo": incluye JNA para que funcione con doble clic
 jar {
-    manifest { attributes 'Main-Class': 'miniscanner.MiniScanner' }
+    // Enable-Native-Access: lo mismo que nativeAccess, pero para «java -jar» y el doble clic (las versiones de
+    // Java anteriores a la 22 ignoran este atributo)
+    manifest { attributes 'Main-Class': 'miniscanner.MiniScanner', 'Enable-Native-Access': 'ALL-UNNAMED' }
     from { configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) } }
     exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
