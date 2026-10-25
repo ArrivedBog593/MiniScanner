@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * siguen funcionando aunque reinicies el juego.
  */
 final class PointerScanner {
-    static final int MAX_RESULTS = 200_000, MAX_NODES = 3_000_000, CHUNK = 4 * 1024 * 1024;
+    static final int MAX_RESULTS = 1_000_000, CHUNK = 4 * 1024 * 1024;
     /** Tamaño máximo de un arreglo en Java. */
     static final int MAX_ARRAY = Integer.MAX_VALUE - 8;
     /** RAM por pointer en el peor caso: listas por hilo (2 × 8 bytes, hasta ×2 de margen al crecer) + arreglos finales (16). */
@@ -36,22 +36,17 @@ final class PointerScanner {
         }
     }
 
-    static final class IntList {
-        int[] a = new int[256]; int n;
-        void add(int v) { if (n == a.length) a = Arrays.copyOf(a, n * 2); a[n++] = v; }
-    }
-
     // ------------------------------------------------------------ escaneo
     /**
      * @param phase recibe textos de fase para mostrar ("Leyendo memoria", etc.)
      */
-    static List<AddressExpr> scan(Win.Proc proc, long target, int maxLevel, long maxOffset,
-                                  Progress p, java.util.function.Consumer<String> phase) throws Exception {
+    static Result scan(Win.Proc proc, long target, int maxLevel, long maxOffset,
+                       Progress p, java.util.function.Consumer<String> phase) throws Exception {
         proc.refreshModules();
         // 1) Mapa de todos los pointers de la memoria escribible: (valor → dirección donde está guardado)
         phase.accept("Leyendo memoria");
         List<Win.Region> regs = proc.regions(true);
-        if (regs.isEmpty()) return List.of();
+        if (regs.isEmpty()) return new Result(new ArrayList<>(), false, false);
         long[] rb = new long[regs.size()], re = new long[regs.size()];
         for (int i = 0; i < regs.size(); i++) { rb[i] = regs.get(i).base(); re[i] = regs.get(i).end(); }
         long min = rb[0], max = re[re.length - 1];
@@ -116,56 +111,174 @@ final class PointerScanner {
         sort(vals, addrs, 0, n - 1);
 
         phase.accept("Buscando cadenas");
-        List<AddressExpr> results = findChains(vals, addrs, n, target, maxLevel, maxOffset, proc::moduleAt, p);
+        // Cada nodo intermedio usa unos 64 bytes (dirección, valor, conjunto de vistos y listas con margen)
+        Runtime rt = Runtime.getRuntime();
+        long free = rt.maxMemory() - (rt.totalMemory() - rt.freeMemory()) - RESERVE;
+        long nodeLimit = Math.max(100_000, Math.min(free / 64, MAX_ARRAY / 4));
+        Result res = findChains(vals, addrs, n, target, maxLevel, maxOffset, proc::moduleAt, p, nodeLimit);
         p.update(1, 1);
         // Las cadenas más cortas primero: suelen ser las más estables
-        results.sort(Comparator.comparingInt((AddressExpr e) -> e.offsets.length).thenComparingLong(e -> e.offset));
-        return results;
+        res.chains().sort(Comparator.comparingInt((AddressExpr e) -> e.offsets.length).thenComparingLong(e -> e.offset));
+        return res;
     }
 
-    /** Búsqueda hacia atrás: ¿qué pointers apuntan cerca del objetivo? ¿y cerca de esos?... */
-    static List<AddressExpr> findChains(long[] vals, long[] addrs, int total, long target, int maxLevel, long maxOffset,
-                                        java.util.function.LongFunction<Win.Module> moduleAt, Progress p) {
-        List<AddressExpr> results = new ArrayList<>();
-        long[] nAddr = new long[1024], nOff = new long[1024];
-        int[] nPar = new int[1024];
-        int nodes = 0;
-        nAddr[0] = target; nPar[0] = -1; nodes = 1;
-        IntList current = new IntList();
-        current.add(0);
-        HashSet<Long> visited = new HashSet<>();
-        visited.add(target);
+    /**
+     * Resultado de buscar cadenas. Los avisos dicen si se llegó a un tope: en ese caso la cadena buena puede faltar.
+     * @param nodesCapped   no cupieron todos los pasos intermedios en la RAM
+     * @param resultsCapped había más de MAX_RESULTS cadenas y se guardaron las primeras (las más cortas)
+     */
+    record Result(List<AddressExpr> chains, boolean nodesCapped, boolean resultsCapped) {}
 
-        outer:
-        for (int level = 1; level <= maxLevel && current.n > 0; level++) {
-            IntList next = new IntList();
-            for (int ci = 0; ci < current.n; ci++) {
-                int t = current.a[ci];
-                long tAddr = nAddr[t];
-                for (int k = lowerBound(vals, total, tAddr - maxOffset); k < total && vals[k] <= tAddr; k++) {
-                    long a = addrs[k], off = tAddr - vals[k];
-                    Win.Module m = moduleAt.apply(a);
-                    if (m != null) {
-                        // Llegamos a una dirección estática: cadena completa
-                        List<Long> offs = new ArrayList<>();
-                        offs.add(off);
-                        for (int x = t; nPar[x] != -1; x = nPar[x]) offs.add(nOff[x]);
-                        results.add(new AddressExpr(m.name(), a - m.base(), offs.stream().mapToLong(Long::longValue).toArray()));
-                        if (results.size() >= MAX_RESULTS) break outer;
-                    } else if (level < maxLevel && nodes < MAX_NODES && visited.add(a)) {
-                        if (nodes == nAddr.length) {
-                            int cap = nodes * 2;
-                            nAddr = Arrays.copyOf(nAddr, cap); nOff = Arrays.copyOf(nOff, cap); nPar = Arrays.copyOf(nPar, cap);
-                        }
-                        nAddr[nodes] = a; nOff[nodes] = off; nPar[nodes] = t;
-                        next.add(nodes++);
+    /** Para guardar en un solo long el valor de un pointer (como mucho 48 bits en Windows) y su nivel. */
+    private static final long VAL_MASK = (1L << 56) - 1;
+
+    /**
+     * Busca todas las cadenas que van de una dirección estática (dentro de un exe/dll) hasta el objetivo.
+     * <ol>
+     *  <li>Hacia atrás desde el objetivo: ¿qué pointers apuntan cerca? ¿y cerca de esos?... Así se sabe a cuántos
+     *      pasos del objetivo está cada dirección intermedia ("nodo"), y qué direcciones estáticas apuntan a cuáles.</li>
+     *  <li>Hacia adelante desde cada dirección estática: se recorren TODOS los caminos hasta el objetivo dentro del
+     *      nivel máximo. No basta con el primero que se encontró: si dos campos de una estructura apuntan cerca del
+     *      objetivo, uno puede ser estable y el otro temporal, y hay que conservar los dos para filtrar después.</li>
+     * </ol>
+     * @param nodeLimit cuántos nodos caben en la RAM
+     */
+    static Result findChains(long[] vals, long[] addrs, int total, long target, int maxLevel, long maxOffset,
+                             java.util.function.LongFunction<Win.Module> moduleAt, Progress p, long nodeLimit) {
+        // Fase 1 en su propio método: sus estructuras temporales (como el conjunto de vistos) se liberan al volver
+        Backward bw = backward(vals, addrs, total, target, maxLevel, maxOffset, moduleAt, p, nodeLimit);
+        long[] na = bw.nodeAddr(), np = bw.nodePacked();
+        LongList statAddr = bw.statAddr(), statTo = bw.statTo(), statOff = bw.statOff();
+
+        // ---- 2) hacia adelante
+        Forward f = new Forward(na, np, target, maxOffset, maxLevel, moduleAt);
+        for (int e = 0; e < statAddr.n && !f.capped; e++) {
+            long s = statAddr.a[e], to = statTo.a[e];
+            f.path[0] = statOff.a[e];
+            Win.Module m = moduleAt.apply(s);
+            if (to == target) f.emit(m, s, 1);
+            else {
+                int j = Arrays.binarySearch(na, to);
+                if (j >= 0) f.walk(m, s, j, maxLevel - 1, 1);
+            }
+            if ((e & 255) == 0) p.update(maxLevel * 1000L + e * 1000L / statAddr.n, (maxLevel + 1) * 1000L);
+        }
+        return new Result(f.results, bw.nodesCapped(), f.capped);
+    }
+
+    /**
+     * Lo que deja la fase 1: los nodos ordenados por dirección (con su valor | nivel << 56) y las direcciones
+     * estáticas que apuntan cerca de cada nodo (statTo) o del objetivo, con su offset.
+     */
+    private record Backward(long[] nodeAddr, long[] nodePacked, LongList statAddr, LongList statTo, LongList statOff,
+                            boolean nodesCapped) {}
+
+    /** Fase 1 de findChains: hacia atrás desde el objetivo, nivel por nivel. */
+    private static Backward backward(long[] vals, long[] addrs, int total, long target, int maxLevel, long maxOffset,
+                                     java.util.function.LongFunction<Win.Module> moduleAt, Progress p, long nodeLimit) {
+        LongList nodeAddr = new LongList(), nodePacked = new LongList();
+        LongList statAddr = new LongList(), statTo = new LongList(), statOff = new LongList();
+        LongSet seen = new LongSet();
+        seen.add(target);
+        LongList frontier = new LongList();
+        frontier.add(target);
+        boolean nodesCapped = false;
+        for (int level = 1; level <= maxLevel && frontier.n > 0; level++) {
+            LongList next = new LongList();
+            for (int ci = 0; ci < frontier.n; ci++) {
+                long b = frontier.a[ci];
+                for (int k = lowerBound(vals, total, b - maxOffset); k < total && vals[k] <= b; k++) {
+                    long a = addrs[k];
+                    if (moduleAt.apply(a) != null) {
+                        // Dirección estática que apunta cerca de b: empieza una (o varias) cadenas
+                        statAddr.add(a); statTo.add(b); statOff.add(b - vals[k]);
+                    } else if (level < maxLevel && !seen.contains(a)) {
+                        if (nodeAddr.n >= nodeLimit) { nodesCapped = true; continue; }
+                        seen.add(a);
+                        nodeAddr.add(a);
+                        nodePacked.add(vals[k] | (long) level << 56);
+                        next.add(a);
                     }
                 }
-                if ((ci & 1023) == 0) p.update((long) (level - 1) * 1000 + ci * 1000L / current.n, maxLevel * 1000L);
+                if ((ci & 1023) == 0) p.update((long) (level - 1) * 1000 + ci * 1000L / frontier.n, (maxLevel + 1) * 1000L);
             }
-            current = next;
+            frontier = next;
         }
-        return results;
+        int n = nodeAddr.n;
+        long[] na = Arrays.copyOf(nodeAddr.a, n), np = Arrays.copyOf(nodePacked.a, n);
+        sort(na, np, 0, n - 1);
+        return new Backward(na, np, statAddr, statTo, statOff, nodesCapped);
+    }
+
+    /** La segunda fase de findChains: recorre los caminos desde una dirección estática hasta el objetivo. */
+    private static final class Forward {
+        final long[] na, np;
+        final long target, maxOffset;
+        final java.util.function.LongFunction<Win.Module> moduleAt;
+        final long[] path;
+        final List<AddressExpr> results = new ArrayList<>();
+        boolean capped;
+
+        Forward(long[] na, long[] np, long target, long maxOffset, int maxLevel, java.util.function.LongFunction<Win.Module> moduleAt) {
+            this.na = na; this.np = np; this.target = target; this.maxOffset = maxOffset; this.moduleAt = moduleAt;
+            path = new long[maxLevel];
+        }
+
+        /**
+         * Sigue desde el nodo j, cuando ya hay len offsets en path y quedan budget por usar.
+         * Solo se entra en nodos que llegan al objetivo dentro del presupuesto, así que no hay caminos sin salida.
+         */
+        void walk(Win.Module m, long base, int j, int budget, int len) {
+            if (capped) return;
+            long v = np[j] & VAL_MASK;
+            if (target >= v && target - v <= maxOffset) {
+                path[len] = target - v;
+                emit(m, base, len + 1);
+            }
+            if (budget < 2) return;
+            for (int c = lowerBound(na, na.length, v); c < na.length && na[c] - v <= maxOffset && !capped; c++) {
+                if ((int) (np[c] >>> 56) > budget - 1) continue;
+                path[len] = na[c] - v;
+                walk(m, base, c, budget - 1, len + 1);
+            }
+        }
+
+        void emit(Win.Module m, long base, int len) {
+            results.add(new AddressExpr(m.name(), base - m.base(), Arrays.copyOf(path, len)));
+            if (results.size() >= MAX_RESULTS) capped = true;
+        }
+    }
+
+    /** Conjunto de direcciones (long distinto de 0) sin cajas de Long: con millones de nodos, ahorra mucha RAM. */
+    static final class LongSet {
+        private long[] t = new long[1024];
+        private int n;
+
+        boolean contains(long v) {
+            for (int i = slot(v); ; i = (i + 1) & (t.length - 1)) {
+                if (t[i] == v) return true;
+                if (t[i] == 0) return false;
+            }
+        }
+
+        void add(long v) {
+            if (n * 2 >= t.length) grow();
+            int i = slot(v);
+            while (t[i] != 0 && t[i] != v) i = (i + 1) & (t.length - 1);
+            if (t[i] == 0) { t[i] = v; n++; }
+        }
+
+        private int slot(long v) {
+            long h = v * 0x9E3779B97F4A7C15L;
+            return Long.hashCode(h) & (t.length - 1);
+        }
+
+        private void grow() {
+            long[] old = t;
+            t = new long[old.length * 2];
+            n = 0;
+            for (long v : old) if (v != 0) add(v);
+        }
     }
 
     static List<AddressExpr> filterByAddress(Win.Proc proc, List<AddressExpr> list, long addr, Progress p) {

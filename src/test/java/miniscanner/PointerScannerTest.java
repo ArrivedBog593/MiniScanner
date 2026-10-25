@@ -19,7 +19,7 @@ class PointerScannerTest {
         long[] vals = new long[pairs.length], addrs = new long[pairs.length];
         for (int i = 0; i < pairs.length; i++) { vals[i] = pairs[i][0]; addrs[i] = pairs[i][1]; }
         PointerScanner.sort(vals, addrs, 0, pairs.length - 1);
-        return PointerScanner.findChains(vals, addrs, pairs.length, target, maxLevel, maxOffset, MODULE_AT, NONE);
+        return PointerScanner.findChains(vals, addrs, pairs.length, target, maxLevel, maxOffset, MODULE_AT, NONE, Long.MAX_VALUE).chains();
     }
 
     static boolean has(List<AddressExpr> list, long baseOff, long... offsets) {
@@ -37,6 +37,22 @@ class PointerScannerTest {
         assertEquals(2, r.size());
         assertTrue(has(r, 0x200, 0x8));
         assertTrue(has(r, 0x100, 0x100, 0x10), "offsets del primero (cerca de la base) al último");
+    }
+
+    @Test
+    void noPierdeCaminosQueCompartenUnPasoIntermedio() {
+        // Una estructura X (en 0x30000) con dos campos que apuntan cerca del objetivo: uno estable (+10) y uno
+        // temporal (+18). [0x20000] apunta a X, y [game.exe+100] apunta cerca de 0x20000.
+        // Las dos cadenas son válidas hoy; si se guarda solo una, puede ser justo la que no sobrevive al reinicio.
+        long target = 0x50000;
+        List<AddressExpr> r = chains(target, 3, 0x1000,
+                new long[]{target - 0x10, 0x30010},  // X+10 → objetivo - 10
+                new long[]{target - 0x8, 0x30018},   // X+18 → objetivo - 8
+                new long[]{0x30000, 0x20000},        // [0x20000] = X
+                new long[]{0x1FF00, 0x400100});      // [game.exe+100] = 0x20000 - 100
+        assertTrue(has(r, 0x100, 0x100, 0x10, 0x10), "camino por X+10: " + r);
+        assertTrue(has(r, 0x100, 0x100, 0x18, 0x8), "camino por X+18: " + r);
+        assertEquals(2, r.size());
     }
 
     @Test
@@ -79,7 +95,7 @@ class PointerScannerTest {
         long[] vals = {0x4FF0}, addrs = {0x3000};
         Progress cancel = (done, total) -> { throw new Progress.Cancelled(); };
         assertThrows(Progress.Cancelled.class,
-                () -> PointerScanner.findChains(vals, addrs, 1, 0x5000, 3, 0x1000, MODULE_AT, cancel));
+                () -> PointerScanner.findChains(vals, addrs, 1, 0x5000, 3, 0x1000, MODULE_AT, cancel, Long.MAX_VALUE));
     }
 
     @Test

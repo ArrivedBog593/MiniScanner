@@ -68,7 +68,17 @@ final class PointerTab extends JPanel {
         int level = (Integer) ptrLevel.getValue();
         Win.Proc p = app.proc;
         app.runBg("Leyendo memoria", () -> PointerScanner.scan(p, target, level, maxOff, app::setProg, s -> app.phase = s),
-                list -> { pointers = list; showPointers(); });
+                res -> {
+                    pointers = res.chains();
+                    showPointers();
+                    if (res.nodesCapped() || res.resultsCapped()) app.info("Ojo: el escaneo llegó a un tope y la cadena buena puede faltar.\n"
+                            + (res.nodesCapped() ? """
+                            - No cupieron todos los pasos intermedios en la memoria de Java: baja el Nivel máx u Offset máx,
+                              o abre MiniScanner con más memoria (java -Xmx8g -jar MiniScanner.jar).
+                            """ : "")
+                            + (res.resultsCapped() ? "- Había más de " + String.format("%,d", PointerScanner.MAX_RESULTS)
+                                    + " cadenas: se guardaron las más cortas.\n" : ""));
+                });
     }
 
     void filterPtrByAddress() {
