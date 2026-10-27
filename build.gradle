@@ -43,3 +43,35 @@ jar {
     exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
+
+// «gradlew paquete»: carpeta con MiniScanner.exe y su propio Java dentro (no hace falta instalar Java),
+// y un .zip de esa carpeta para pasarlo a otra PC. Usa el jpackage del JDK con el que corre Gradle.
+def appImage = layout.buildDirectory.dir('paquete')
+
+tasks.register('appImage', Exec) {
+    description = 'Arma build/paquete/MiniScanner con MiniScanner.exe y un Java reducido.'
+    dependsOn jar
+    inputs.file jar.archiveFile
+    outputs.dir appImage
+    def jpackage = "${System.getProperty('java.home')}/bin/jpackage"
+    def jarFile = jar.archiveFile.get().asFile
+    def dest = appImage.get().asFile
+    doFirst { delete dest }
+    commandLine jpackage, '--type', 'app-image',
+            '--name', 'MiniScanner',
+            '--input', jarFile.parent, '--main-jar', jarFile.name,
+            '--dest', dest,
+            // Solo los módulos que usa (jdeps), más los textos en español de Java: ~45 MB en vez del JDK entero
+            '--add-modules', 'java.base,java.desktop,java.logging,java.prefs,java.xml,jdk.localedata',
+            '--jlink-options', '--strip-debug --no-man-pages --no-header-files --include-locales=en,es',
+            '--java-options', nativeAccess
+}
+
+tasks.register('paquete', Zip) {
+    description = 'Comprime build/paquete/MiniScanner en build/paquete/MiniScanner.zip.'
+    group = 'distribution'
+    dependsOn 'appImage'
+    from(appImage.map { it.dir('MiniScanner') }) { into 'MiniScanner' }
+    destinationDirectory = appImage
+    archiveFileName = 'MiniScanner.zip'
+}
